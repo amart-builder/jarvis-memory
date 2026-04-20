@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.atlas.jarvis-compact-daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- NOTE: these paths assume the Mac Mini install at ~/Atlas. Adjust for the MBP if needed. -->
+        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python</string>
+        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/scripts/run_compaction.py</string>
+        <string>--tier</string>
+        <string>daily</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Don't hold the job running; launchd just kicks it off once per schedule -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Logs -->
+    <key>StandardOutPath</key>
+    <string>/Users/alexanderjmartin/Atlas/brain/logs/jarvis-compact-daily.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/alexanderjmartin/Atlas/brain/logs/jarvis-compact-daily.err</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/alexanderjmartin/Atlas/jarvis-memory</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

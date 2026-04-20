@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+pytest-cache-files-*/
+.venv/
+venv/
+*.egg-info/
+
+# Secrets and environment
+.env
+.env.*
+!.env.example
+
+# Local data stores (not source, runtime state)
+chromadb/
+*.sqlite
+*.sqlite3
+*.db
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build artifacts
+build/
+dist/
