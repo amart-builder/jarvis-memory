@@ -50,6 +50,88 @@ logger = logging.getLogger(__name__)
 # ── Tool Definitions ───────────────────────────────────────────────────
 
 JARVIS_TOOLS = [
+    # === RUN 2 — ENTITY LAYER ===
+    # 4 tools surfacing the Page + typed-edge knowledge graph:
+    # find_orphans, doctor, get_page, list_pages.
+    # See brain/projects/jarvis-memory/plans/runs/2026-04-20-entity-layer/spec.md.
+    Tool(
+        name="find_orphans",
+        description=(
+            "Return Pages with zero inbound typed edges (any of ATTENDED, WORKS_AT, "
+            "INVESTED_IN, FOUNDED, ADVISES, DECIDED_ON, MENTIONS, REFERS_TO). "
+            "EVIDENCED_BY does NOT count — timeline-only Pages are still orphaned. "
+            "Results grouped by domain. Useful for spotting entities that haven't "
+            "yet been connected to the rest of the graph."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "description": "Filter to a single domain (e.g., 'person', 'company').",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="doctor",
+        description=(
+            "Run health checks against the entity layer. Returns PASS/WARN/FAIL for "
+            "schema_v2_present (expected constraints + indexes exist), page_completeness "
+            "(fraction of Pages with non-empty compiled_truth), edge_validity "
+            "(no dangling EVIDENCED_BY edges), and orphan_count_reasonable "
+            "(orphan Pages < 10% of total). Each check carries a fix_hint on failure."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "fast": {
+                    "type": "boolean",
+                    "description": "Skip the orphan_count_reasonable check (cheaper run).",
+                    "default": False,
+                },
+            },
+        },
+    ),
+    Tool(
+        name="get_page",
+        description=(
+            "Fetch a single Page by slug. Returns the Page node's slug, domain, "
+            "compiled_truth, created_at, updated_at — or null if not found."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "slug": {
+                    "type": "string",
+                    "description": "Canonical Page identifier (e.g., 'foundry').",
+                },
+            },
+            "required": ["slug"],
+        },
+    ),
+    Tool(
+        name="list_pages",
+        description=(
+            "List all Pages, optionally filtered by domain, newest-first by updated_at. "
+            "Returns up to `limit` Page dicts (default 100)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "description": "Filter by domain (e.g., 'person', 'company', 'project').",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 100).",
+                    "default": 100,
+                },
+            },
+        },
+    ),
+    # === END RUN 2 — ENTITY LAYER ===
     Tool(
         name="scored_search",
         description=(
@@ -528,6 +610,46 @@ async def _dispatch(
     get_driver,
 ) -> dict[str, Any]:
     """Route tool calls to the appropriate handler."""
+
+    # === RUN 2 — ENTITY LAYER ===
+    # Dispatch for 4 Run 2 tools. Kept at the top of the if-chain so the
+    # fenced block stays together. Run 4 adds its trust-boundary handlers
+    # at the bottom of this function (no textual overlap with this block).
+    if name == "find_orphans":
+        from jarvis_memory.orphans import find_orphans as _find_orphans
+
+        driver = get_driver()
+        grouped = _find_orphans(domain=args.get("domain"), driver=driver)
+        return {
+            "count": sum(len(v) for v in grouped.values()),
+            "by_domain": {d: [p.to_dict() for p in pages] for d, pages in grouped.items()},
+        }
+
+    if name == "doctor":
+        from jarvis_memory.doctor import run_health_checks
+
+        driver = get_driver()
+        report = run_health_checks(driver=driver, fast=bool(args.get("fast", False)))
+        return report
+
+    if name == "get_page":
+        from jarvis_memory.pages import get_page as _get_page
+
+        driver = get_driver()
+        page = _get_page(args["slug"], driver=driver)
+        return {"page": page.to_dict() if page else None}
+
+    if name == "list_pages":
+        from jarvis_memory.pages import list_pages as _list_pages
+
+        driver = get_driver()
+        pages = _list_pages(
+            domain=args.get("domain"),
+            driver=driver,
+            limit=int(args.get("limit", 100)),
+        )
+        return {"count": len(pages), "pages": [p.to_dict() for p in pages]}
+    # === END RUN 2 — ENTITY LAYER ===
 
     # ── scored_search (v2: ChromaDB semantic + metadata filtering) ────
 
