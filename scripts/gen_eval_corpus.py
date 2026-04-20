@@ -14,8 +14,9 @@ Reproducibility
 ---------------
 - Python ``random.seed(SEED)`` (default 20260420) fixes uuid generation and
   group/type/date sampling.
-- Anthropic calls use ``temperature=0.3`` and fixed prompts per topic; the
-  LLM side isn't byte-reproducible, but the COMMITTED corpus is — the
+- Anthropic calls use fixed prompts per topic; the LLM side isn't
+  byte-reproducible (sampling is non-deterministic on ``claude-opus-4-7``
+  with no ``temperature`` parameter), but the COMMITTED corpus is — the
   on-disk JSONL files are the ground truth for the eval harness.
 
 Usage
@@ -74,9 +75,9 @@ TYPE_ALIAS: dict[str, str] = {
     "completion": "outcome",
 }
 
-OPUS_MODEL = "claude-opus-4-6"  # Opus model that still accepts `temperature`.
-# Note: claude-opus-4-7 deprecated the temperature param; we keep 4-6 so the
-# documented `temperature=0.3` seed-equivalent still applies.
+OPUS_MODEL = "claude-opus-4-7"  # Latest Opus; does not accept `temperature`.
+# Per user directive: always use 4-7. Temperature is unnecessary for this
+# generator — the COMMITTED JSONL files are the reproducible artifact.
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -305,23 +306,11 @@ Return STRICT JSON. No prose before/after. Schema:
   ]
 }}
 """
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            temperature=0.3,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except Exception as e:
-        # Newer Opus models (e.g., 4-7) deprecate `temperature`; retry without.
-        if "temperature" in str(e).lower() and "deprecated" in str(e).lower():
-            response = client.messages.create(
-                model=model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        else:
-            raise
+    response = client.messages.create(
+        model=model,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
     text = response.content[0].text.strip()
     # Strip code fences if present.
     if text.startswith("```"):
