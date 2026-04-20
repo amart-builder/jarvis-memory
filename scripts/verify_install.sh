@@ -82,7 +82,12 @@ else
     check "Neo4j reachable at $NEO4J_URI" \
         python -c "from neo4j import GraphDatabase; import os; d = GraphDatabase.driver(os.environ['NEO4J_URI'], auth=(os.environ['NEO4J_USER'], os.environ['NEO4J_PASSWORD'])); d.verify_connectivity(); d.close()"
     check "Run 2 schema applied (page_slug_unique + page_compiled_truth_fulltext)" \
-        bash -c 'python scripts/migrate_to_v2.py --dry-run --json | python -c "import json,sys; d=json.load(sys.stdin); assert d[\"planned_count\"] == 0, f\"migration not applied: {d[\\\"planned_count\\\"]} statements pending\""'
+        python -c "
+import json, subprocess, sys
+out = subprocess.check_output([sys.executable, 'scripts/migrate_to_v2.py', '--dry-run', '--json'])
+d = json.loads(out)
+assert d['planned_count'] == 0, f\"migration not applied: {d['planned_count']} statements pending ({d.get('planned')})\"
+"
 fi
 
 # ── 4. ChromaDB + embedding model ─────────────────────────
