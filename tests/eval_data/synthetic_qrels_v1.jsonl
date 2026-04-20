@@ -1,0 +1,50 @@
+{"query_id": "navi-auth-q00", "relevant_ids": ["57d84b04-aa07-efb1-d4f9-21c8475669ec", "3db1f542-f983-05b0-1b95-b58c4f33f705"]}
+{"query_id": "navi-auth-q01", "relevant_ids": ["0f91bd61-3053-32a4-50ac-c75e397ce2cd", "d74c1c2e-b842-5594-96ad-097729a218f7"]}
+{"query_id": "navi-auth-q02", "relevant_ids": ["cce0022d-2095-07cf-0f6b-4533585bf594", "d3533586-53c8-35bd-b282-1cb55856e971"]}
+{"query_id": "navi-auth-q03", "relevant_ids": ["781c78b2-ad94-415d-9209-05756dfcc62e", "aa8d72fc-4a90-f9f6-6782-bc656f259007", "aac83464-1cad-7dbd-80ef-0ad95581a2ea", "d74c1c2e-b842-5594-96ad-097729a218f7"]}
+{"query_id": "navi-auth-q04", "relevant_ids": ["e6b6f8f1-ce7b-9002-9db5-103f25ac2188", "fdf27b8b-30ef-4a39-7e5e-666300524f07"]}
+{"query_id": "navi-stripe-q00", "relevant_ids": ["4f6cfd11-d6fc-88e2-f41e-e54413e14e65", "28329aa7-72e6-bbe8-e683-32618a97aece", "8f289d20-e6a9-88a6-7853-801cf7627117"]}
+{"query_id": "navi-stripe-q01", "relevant_ids": ["dee1638e-5d7a-2b3b-a9c5-4d215287eec1", "dbf1aec6-40a5-6410-eaa0-cb938bdb4ed5", "6987d251-3eef-41b1-6947-691bc38abb8f", "8ff5b305-fea5-8485-964f-f6e99d537667"]}
+{"query_id": "navi-stripe-q02", "relevant_ids": ["0c3ca96f-83ee-e9fa-6aae-c1ae77b1b806", "40ea5222-0e2b-f8e2-2101-e30b1276f557"]}
+{"query_id": "navi-stripe-q03", "relevant_ids": ["37e01f27-8932-b87d-dda8-160b794bd914", "31664f84-ae49-75b9-c400-5cf7578094ec", "9a998bda-bbfa-436d-7c6a-90badaa6cc8b", "75d8ebc6-508b-5c88-7d02-71a7bbfc25a0"]}
+{"query_id": "navi-stripe-q04", "relevant_ids": ["16a1d7a8-7087-5591-aedc-953b8ca3aa95", "dee1638e-5d7a-2b3b-a9c5-4d215287eec1", "8ff5b305-fea5-8485-964f-f6e99d537667"]}
+{"query_id": "navi-deals-q00", "relevant_ids": ["f5ae7e7e-e29f-7cf6-5d09-73afdb1b61f4", "01895dbe-4c5f-e42e-e48d-8af1c8b06a42"]}
+{"query_id": "navi-deals-q01", "relevant_ids": ["cf13e14f-7387-326f-fcf8-43baaf75f4c4", "6570ea38-b09a-7526-9548-28cc00cae5a6", "1a25d303-6661-08e3-7cf7-0dd37a56b3a7"]}
+{"query_id": "navi-deals-q02", "relevant_ids": ["233a03b5-2bab-71a1-2a9b-e33650080897", "a6b89c0a-878c-8af4-daa6-48706337513c", "9695ce6d-51f1-b249-3d01-710e9e56f843"]}
+{"query_id": "navi-deals-q03", "relevant_ids": ["778d508b-0aa4-df39-f8b4-c266ade5fe86", "01895dbe-4c5f-e42e-e48d-8af1c8b06a42"]}
+{"query_id": "navi-deals-q04", "relevant_ids": ["a6b89c0a-878c-8af4-daa6-48706337513c", "c18bf35c-a0a6-b041-06bd-ec861178399a"]}
+{"query_id": "foundry-lp-portal-q00", "relevant_ids": ["97044e5c-b355-c97d-c0ae-31b30ebe7bd6", "8a7342f1-481a-59e7-6003-4fb34a18151c"]}
+{"query_id": "foundry-lp-portal-q01", "relevant_ids": ["645f2739-5085-6d73-d1fd-8b7e2b516b8b", "b727b403-cc20-7da7-09cd-e23b9a9e2da8"]}
+{"query_id": "foundry-lp-portal-q02", "relevant_ids": ["b2667eb6-6f26-97e4-279b-35847988adf3"]}
+{"query_id": "foundry-lp-portal-q03", "relevant_ids": ["0c61adf0-97e8-f0fe-40c2-6d5d3bd348ca", "13ed5b80-3d9e-7219-364a-65db406d9edc", "3db7486d-b293-106d-75dc-181e7ebc2678"]}
+{"query_id": "foundry-lp-portal-q04", "relevant_ids": ["affa5017-bd83-7bbf-0408-acd45ffe354b", "71c8f7d4-6865-49f1-67f8-95fb86dcc7bd"]}
+{"query_id": "foundry-email-q00", "relevant_ids": ["4d71b2bb-db10-0888-f62c-3c06e81212da", "68998916-f765-9046-95a8-7b95e1dda535", "611c9cef-35b5-dd76-6e8d-f5b5d5dd7f03", "fd33afcb-b0ed-28c5-c11a-713b63af8474"]}
+{"query_id": "foundry-email-q01", "relevant_ids": ["7ec61eb0-321b-c8b9-5535-bf2e9b7abd09", "c9ffa8b2-be8f-8bfc-29c9-8b0d9ca0c4b1", "ffae4f29-3782-1b85-e0ba-11261913e4b6"]}
+{"query_id": "foundry-email-q02", "relevant_ids": ["a5f8356a-d9d1-b2d8-7fde-7933acbb9d3f"]}
+{"query_id": "foundry-email-q03", "relevant_ids": ["b9f965ac-52e5-f651-e4ef-94a23677ba58", "21c27ede-958e-b125-9bf1-45d8153d9a37"]}
+{"query_id": "foundry-email-q04", "relevant_ids": ["eea2adce-eb87-c08c-45b3-e3cec4c354f5", "50957912-618f-ec55-4156-64ba3733c2b6", "ea5e9c17-a694-ccd5-9bce-d6cbdb99c7e2"]}
+{"query_id": "catalyst-pipeline-q00", "relevant_ids": ["4e06918a-026f-d8d5-c053-734ba7aca857", "bf9316ee-bd79-8de1-cf74-054a34b3e3f8", "a4d04e41-0cbb-47a8-8e47-eb9ead44b1ff"]}
+{"query_id": "catalyst-pipeline-q01", "relevant_ids": ["1aff82e2-1861-46c8-f676-71f86c193288", "c352ca61-7753-fef5-14d0-814255115944"]}
+{"query_id": "catalyst-pipeline-q02", "relevant_ids": ["ae6a798e-1cf4-5136-d6e0-005131c7d2f8", "82a70302-5704-9dce-8006-7dbcfc1c1a6e", "caff59fd-bf8f-767a-6016-07cbe2df0756"]}
+{"query_id": "catalyst-pipeline-q03", "relevant_ids": ["c58a48f3-dffc-bc1f-ff8d-e3c73e4aa3ca"]}
+{"query_id": "catalyst-pipeline-q04", "relevant_ids": ["36a92ff2-fda2-f421-d253-a7234a4f7242", "25910401-db72-895e-76ef-785bf3be4b55"]}
+{"query_id": "catalyst-llm-q00", "relevant_ids": ["e09fe11f-f234-5735-2d29-28433e1bec3f", "1481989f-eb7a-62b0-fb92-fea838ec9365", "4f270c48-d236-2c71-bc5c-36e4f8dae59a"]}
+{"query_id": "catalyst-llm-q01", "relevant_ids": ["b86091e7-8e98-f248-c518-a1b827e8e565", "995a3690-4367-f01f-784c-5ff0278fa6e1", "3d77d49e-7835-e65c-b2c0-41b520d52464"]}
+{"query_id": "catalyst-llm-q02", "relevant_ids": ["1515376a-90f5-cccf-292f-7b096bccc9c7", "f0e5bb4a-58d4-9d81-835a-f3c0bd758715"]}
+{"query_id": "catalyst-llm-q03", "relevant_ids": ["0f525bfb-ade9-ec15-1acb-89fc8a91e71f", "b86091e7-8e98-f248-c518-a1b827e8e565"]}
+{"query_id": "catalyst-llm-q04", "relevant_ids": ["9e5e3a87-ce55-3053-71be-a74aaaf43d60", "2067596c-a93f-8376-e1f8-7fcdf79fb6d0"]}
+{"query_id": "combinator-mvp-q00", "relevant_ids": ["0ce8443a-1bce-2481-ebd2-99c8e9b93602", "e81e6682-9071-7818-975d-c89f5fbdb447", "97a62c80-a40e-886c-cd65-70e851efa855", "b9799d6e-a69a-703b-d6f8-6d18ebec7269"]}
+{"query_id": "combinator-mvp-q01", "relevant_ids": ["fd1f8b25-2b5a-aa93-e352-5e49cdcd8449", "64c1df3b-b672-0cd3-4bac-118a03096413", "f423eae2-901a-21ec-e932-ee6cd0b0f594"]}
+{"query_id": "combinator-mvp-q02", "relevant_ids": ["2b340ce3-9c0f-fdb6-658f-fea4d5aad01d", "489ae579-511d-182b-7cac-ba42f707518d"]}
+{"query_id": "combinator-mvp-q03", "relevant_ids": ["197371fc-9a17-9f40-3e12-acf24f01d12f", "4a046702-2b66-61d7-7645-183b3e4d6ed0", "087562c1-f1aa-1c1a-edff-c09e2db95375"]}
+{"query_id": "combinator-mvp-q04", "relevant_ids": ["2b340ce3-9c0f-fdb6-658f-fea4d5aad01d", "489ae579-511d-182b-7cac-ba42f707518d", "bbf854a6-2d78-00f3-6402-9e57e7c9b2e3"]}
+{"query_id": "system-memory-q00", "relevant_ids": ["d7a58eb0-a3d5-68fe-3fda-99ad852b407a", "68b057aa-ccac-2ebd-ce89-7c3e5a6d316d"]}
+{"query_id": "system-memory-q01", "relevant_ids": ["6a8e9bff-c36c-e032-b0c8-266a1934edb2", "8ee85ed0-25fb-31f6-5da1-e578b6ec03d1"]}
+{"query_id": "system-memory-q02", "relevant_ids": ["d0210768-6492-7a7c-275c-751cfb808c77", "581ec905-41b3-f55f-3ef8-2ede8cadc0ea"]}
+{"query_id": "system-memory-q03", "relevant_ids": ["b0466293-07a8-6ab9-e117-b4c8623a116a", "1eec92fb-5e3f-a2fb-35c2-2c71a92b4013"]}
+{"query_id": "system-memory-q04", "relevant_ids": ["c0c39a80-ccea-9ee8-bbab-a9661b7ca3ca", "85464a0d-847a-3029-cdfe-e4a1975e18b3", "3a37ab48-99c2-82b4-c91a-25bb3894fc6e"]}
+{"query_id": "system-openclaw-q00", "relevant_ids": ["62c86fab-c30c-c7a9-5099-79a653ecaaaf", "fc016f5f-a2d4-5bd0-d8a1-a7e4d1c22ed5"]}
+{"query_id": "system-openclaw-q01", "relevant_ids": ["04e8428e-c170-1193-1f85-f61840efe970", "a4473f7a-6c49-5255-14b4-9aa0d56b9fa8", "dc89989a-6375-d7e3-5142-95efa1e2d7e8"]}
+{"query_id": "system-openclaw-q02", "relevant_ids": ["130507fc-6b23-dd7d-3b9e-c66df1973501", "4d682d4d-be36-e083-660f-45c557438c5f", "984f6ce2-347c-a935-ebbe-9339709547fb"]}
+{"query_id": "system-openclaw-q03", "relevant_ids": ["b6c66d68-8f83-3a43-f089-a97ef930e36c"]}
+{"query_id": "system-openclaw-q04", "relevant_ids": ["05af9d36-0e8a-1338-6ad9-e3c544b715c3", "3676cb2d-dbcd-d1fc-ffc6-a43e438d20c4", "2ed2c1d3-dbba-ddd8-59e3-7c4b41c21a4a"]}

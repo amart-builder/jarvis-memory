@@ -6,6 +6,12 @@ are pure functions that can be tested directly.
 
 Integration tests with Neo4j should be run separately.
 """
+import logging
+from contextlib import contextmanager
+from unittest.mock import MagicMock
+
+import pytest
+
 from jarvis_memory.conversation import (
     EpisodeRecorder,
     SnapshotManager,
@@ -207,3 +213,122 @@ class TestSnapshotFormatting:
         }
         result = SnapshotManager.format_snapshot_for_injection(snapshot)
         assert "unknown" in result
+
+
+class _FakeDriver:
+    """Minimal Neo4j driver stub for EpisodeRecorder.record_episode.
+
+    Records every Cypher statement for assertion. Returns a single-record
+    result on MATCH queries so the recorder's group_id lookup succeeds.
+    """
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    @contextmanager
+    def session(self):
+        fake = _FakeSession(self.calls)
+        yield fake
+
+    def close(self):  # pragma: no cover - not used by the test
+        pass
+
+
+class _FakeSession:
+    def __init__(self, log: list[tuple[str, dict]]):
+        self._log = log
+
+    def run(self, query: str, **params):
+        self._log.append((query.strip().split("\n", 1)[0], params))
+        return _FakeResult(params)
+
+    def close(self):  # pragma: no cover
+        pass
+
+
+class _FakeResult:
+    def __init__(self, params: dict):
+        self._params = params
+
+    def single(self):
+        # Return a record that looks like {"gid": "system"} for group_id lookups.
+        class R:
+            def __getitem__(self_inner, key):
+                return "system"
+        return R()
+
+
+class TestDetectLayerWarning:
+    """Run 1: detect_layer warning hook on the write path."""
+
+    def test_detect_layer_warning_fires(self, caplog):
+        """Agent-ops content at conf > 0.7 → WARNING log; episode still persists."""
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        # Use content that is clearly ops-flavored and meets should_record
+        # length + keyword bar. "default to" + "always" + significant keyword.
+        content = (
+            "User prefers voice input over typed prompts. Always respond with "
+            "bullet points, never paragraphs. Default to Claude Sonnet unless "
+            "the decision calls for deeper reasoning."
+        )
+
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="preference",
+                group_id="system",
+            )
+
+        # Episode still persisted (non-None uuid, Cypher write issued).
+        assert ep_id is not None
+        assert any("CREATE (e:Episode" in q for q, _ in driver.calls), (
+            f"expected an Episode CREATE call; got {[q for q, _ in driver.calls]}"
+        )
+
+        # Warning emitted with our structured key.
+        msgs = [rec.message for rec in caplog.records if rec.levelno >= logging.WARNING]
+        assert any("possible_mis_routed_write" in m for m in msgs), (
+            f"expected mis-routed-write warning, got {msgs!r}"
+        )
+
+    def test_no_warning_for_world_knowledge(self, caplog):
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        content = (
+            "[DECISION] Chose Neo4j over Weaviate for jarvis-memory. WHY: better "
+            "graph traversal ergonomics. IMPACT: unblocks typed-edge design."
+        )
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="decision",
+                group_id="system",
+            )
+
+        assert ep_id is not None
+        assert not any(
+            "possible_mis_routed_write" in rec.message
+            for rec in caplog.records
+            if rec.levelno >= logging.WARNING
+        )
+
+    def test_none_episode_type_does_not_raise(self):
+        """Legacy callers may omit episode_type — classifier.classify_memory fills in."""
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        content = (
+            "Shipped the rebrand preview to staging. We decided to keep the "
+            "old domain live for 48 hours as a fallback."
+        )
+        ep_id = recorder.record_episode(
+            session_id="test-session",
+            content=content,
+            episode_type=None,
+            group_id="navi",
+        )
+        assert ep_id is not None

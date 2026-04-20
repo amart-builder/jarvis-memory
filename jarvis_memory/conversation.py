@@ -20,7 +20,7 @@ from .config import (
     DEVICE_ID, SESSION_CHAIN_DEPTH, EPISODE_MIN_LENGTH,
     MAX_EPISODES_PER_SESSION, SNAPSHOT_MAX_SIZE,
 )
-from .classifier import classify_memory
+from .classifier import classify_memory, detect_layer
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +356,27 @@ class EpisodeRecorder:
 
         if episode_type is None:
             episode_type = classify_memory(content)
+
+        # Run 1 routing warning: predict the correct layer and log a
+        # structured WARNING if the content looks mis-routed. Never
+        # blocks, never raises — just a signal for later audit.
+        try:
+            layer, layer_conf = detect_layer(content, episode_type)
+            if layer != "world_knowledge" and layer_conf > 0.7:
+                target = {
+                    "agent_operations": "Claude auto-memory (.claude/memory/*.md)",
+                    "session_ephemeral": "current session context (no persistence)",
+                }.get(layer, layer)
+                logger.warning(
+                    "possible_mis_routed_write layer=%s confidence=%s episode_type=%s target=%r preview=%r",
+                    layer,
+                    round(layer_conf, 2),
+                    episode_type,
+                    target,
+                    content[:80],
+                )
+        except Exception as e:  # noqa: BLE001 — advisory only
+            logger.debug(f"detect_layer failed (non-blocking): {e}")
 
         episode_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)

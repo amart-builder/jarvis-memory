@@ -1,0 +1,50 @@
+{"group_id": "navi", "query": "why did we pick Clerk", "query_id": "navi-auth-q00", "topic_id": "navi-auth"}
+{"group_id": "navi", "query": "session timeout settings for LPs", "query_id": "navi-auth-q01", "topic_id": "navi-auth"}
+{"group_id": "navi", "query": "magic link issues with Outlook", "query_id": "navi-auth-q02", "topic_id": "navi-auth"}
+{"group_id": "navi", "query": "SOC2 audit requirements for auth", "query_id": "navi-auth-q03", "topic_id": "navi-auth"}
+{"group_id": "navi", "query": "Clerk webhook problems", "query_id": "navi-auth-q04", "topic_id": "navi-auth"}
+{"group_id": "navi", "query": "what idempotency key format do we use", "query_id": "navi-stripe-q00", "topic_id": "navi-stripe"}
+{"group_id": "navi", "query": "how does K-1 generation work", "query_id": "navi-stripe-q01", "topic_id": "navi-stripe"}
+{"group_id": "navi", "query": "why did we pick Stripe Connect Express", "query_id": "navi-stripe-q02", "topic_id": "navi-stripe"}
+{"group_id": "navi", "query": "webhook handler setup for Connect events", "query_id": "navi-stripe-q03", "topic_id": "navi-stripe"}
+{"group_id": "navi", "query": "carry distribution pipeline plan", "query_id": "navi-stripe-q04", "topic_id": "navi-stripe"}
+{"group_id": "navi", "query": "why do we use NULL instead of infinity for valid_to", "query_id": "navi-deals-q00", "topic_id": "navi-deals"}
+{"group_id": "navi", "query": "migration 0042 rollout plan and owner", "query_id": "navi-deals-q01", "topic_id": "navi-deals"}
+{"group_id": "navi", "query": "how are lp allocations linked to term sheets", "query_id": "navi-deals-q02", "topic_id": "navi-deals"}
+{"group_id": "navi", "query": "audit retention requirements for LP allocations", "query_id": "navi-deals-q03", "topic_id": "navi-deals"}
+{"group_id": "navi", "query": "deferred constraint on allocation sum", "query_id": "navi-deals-q04", "topic_id": "navi-deals"}
+{"group_id": "foundry", "query": "what auth are we using for the portal", "query_id": "foundry-lp-portal-q00", "topic_id": "foundry-lp-portal"}
+{"group_id": "foundry", "query": "mobile breakpoint configuration", "query_id": "foundry-lp-portal-q01", "topic_id": "foundry-lp-portal"}
+{"group_id": "foundry", "query": "charting library for dashboards", "query_id": "foundry-lp-portal-q02", "topic_id": "foundry-lp-portal"}
+{"group_id": "foundry", "query": "Sanity CMS setup details", "query_id": "foundry-lp-portal-q03", "topic_id": "foundry-lp-portal"}
+{"group_id": "foundry", "query": "launch timeline and phases", "query_id": "foundry-lp-portal-q04", "topic_id": "foundry-lp-portal"}
+{"group_id": "foundry", "query": "how is the unsubscribe flow implemented", "query_id": "foundry-email-q00", "topic_id": "foundry-email"}
+{"group_id": "foundry", "query": "what DNS records do we need for SendGrid", "query_id": "foundry-email-q01", "topic_id": "foundry-email"}
+{"group_id": "foundry", "query": "why did we choose SendGrid", "query_id": "foundry-email-q02", "topic_id": "foundry-email"}
+{"group_id": "foundry", "query": "how does the weekly briefing get sent", "query_id": "foundry-email-q03", "topic_id": "foundry-email"}
+{"group_id": "foundry", "query": "what subscriber segments exist", "query_id": "foundry-email-q04", "topic_id": "foundry-email"}
+{"group_id": "catalyst", "query": "what is the dedup key for market ticks", "query_id": "catalyst-pipeline-q00", "topic_id": "catalyst-pipeline"}
+{"group_id": "catalyst", "query": "why did we pick airflow over prefect", "query_id": "catalyst-pipeline-q01", "topic_id": "catalyst-pipeline"}
+{"group_id": "catalyst", "query": "how long did the backfill actually take", "query_id": "catalyst-pipeline-q02", "topic_id": "catalyst-pipeline"}
+{"group_id": "catalyst", "query": "polygon api rate limits and credentials", "query_id": "catalyst-pipeline-q03", "topic_id": "catalyst-pipeline"}
+{"group_id": "catalyst", "query": "who handles backfill during PTO", "query_id": "catalyst-pipeline-q04", "topic_id": "catalyst-pipeline"}
+{"group_id": "catalyst", "query": "why did we pick Sonnet over Opus", "query_id": "catalyst-llm-q00", "topic_id": "catalyst-llm"}
+{"group_id": "catalyst", "query": "Neo4j schema for transcripts", "query_id": "catalyst-llm-q01", "topic_id": "catalyst-llm"}
+{"group_id": "catalyst", "query": "Opus accuracy on guidance extraction", "query_id": "catalyst-llm-q02", "topic_id": "catalyst-llm"}
+{"group_id": "catalyst", "query": "what embedding model are we using", "query_id": "catalyst-llm-q03", "topic_id": "catalyst-llm"}
+{"group_id": "catalyst", "query": "who owns the eval harness now", "query_id": "catalyst-llm-q04", "topic_id": "catalyst-llm"}
+{"group_id": "combinator", "query": "which hosting provider did we pick", "query_id": "combinator-mvp-q00", "topic_id": "combinator-mvp"}
+{"group_id": "combinator", "query": "how many beta testers", "query_id": "combinator-mvp-q01", "topic_id": "combinator-mvp"}
+{"group_id": "combinator", "query": "why svelte over next", "query_id": "combinator-mvp-q02", "topic_id": "combinator-mvp"}
+{"group_id": "combinator", "query": "auth setup for combinator", "query_id": "combinator-mvp-q03", "topic_id": "combinator-mvp"}
+{"group_id": "combinator", "query": "who owns the graph view now", "query_id": "combinator-mvp-q04", "topic_id": "combinator-mvp"}
+{"group_id": "system", "query": "how does composite scoring work", "query_id": "system-memory-q00", "topic_id": "system-memory"}
+{"group_id": "system", "query": "what does the compaction cron do", "query_id": "system-memory-q01", "topic_id": "system-memory"}
+{"group_id": "system", "query": "why did we pick Neo4j", "query_id": "system-memory-q02", "topic_id": "system-memory"}
+{"group_id": "system", "query": "room hall wing metadata meaning", "query_id": "system-memory-q03", "topic_id": "system-memory"}
+{"group_id": "system", "query": "21-type classifier status and performance", "query_id": "system-memory-q04", "topic_id": "system-memory"}
+{"group_id": "system", "query": "where is SOUL.md stored", "query_id": "system-openclaw-q00", "topic_id": "system-openclaw"}
+{"group_id": "system", "query": "how does session handoff work", "query_id": "system-openclaw-q01", "topic_id": "system-openclaw"}
+{"group_id": "system", "query": "list of launchd cron jobs", "query_id": "system-openclaw-q02", "topic_id": "system-openclaw"}
+{"group_id": "system", "query": "why not run agent in docker", "query_id": "system-openclaw-q03", "topic_id": "system-openclaw"}
+{"group_id": "system", "query": "tailscale configuration for mac mini", "query_id": "system-openclaw-q04", "topic_id": "system-openclaw"}
