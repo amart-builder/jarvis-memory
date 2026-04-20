@@ -1,19 +1,19 @@
-"""MCP surface parity — the 23 tools must remain the 23 tools.
+"""MCP surface parity — the frozen tool surface.
 
-Spec §10. Run 1 must NOT add, remove, rename, or reshape any MCP tool.
-We import the canonical list that mcp_server/server.py exposes and
-compare it against the frozen set captured here at Run 1 freeze time.
+Run 1 baseline: 23 tools. Run 2 (entity layer) adds 4 more: find_orphans,
+doctor, get_page, list_pages — bringing the total to 27. This test
+prevents accidental drift; update EXPECTED_TOOL_NAMES only through a
+spec change.
 """
 from __future__ import annotations
 
 from mcp_server.server import JARVIS_TOOLS
 
 
-# The 23 MCP tools — frozen as of the start of Run 1 (2026-04-20).
-# If Sentinel / Verdict ever see this set drift, investigate before
-# merging. Do NOT update this constant without a spec change.
+# The 27 MCP tools — 23 from Run 1 + 4 new in Run 2 (entity layer).
 EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
     {
+        # Run 1 baseline (23)
         "scored_search",
         "classify_memory",
         "lifecycle_status",
@@ -37,14 +37,19 @@ EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
         "set_fact_validity",
         "fact_timeline",
         "search_rooms",
+        # Run 2 additions (4)
+        "find_orphans",
+        "doctor",
+        "get_page",
+        "list_pages",
     }
 )
 
 
-def test_tool_count_is_23():
-    assert len(JARVIS_TOOLS) == 23, (
-        f"expected exactly 23 MCP tools, found {len(JARVIS_TOOLS)}: "
-        f"{[t.name for t in JARVIS_TOOLS]}"
+def test_tool_count_is_27():
+    assert len(JARVIS_TOOLS) == 27, (
+        f"expected exactly 27 MCP tools (23 Run 1 + 4 Run 2), "
+        f"found {len(JARVIS_TOOLS)}: {[t.name for t in JARVIS_TOOLS]}"
     )
 
 

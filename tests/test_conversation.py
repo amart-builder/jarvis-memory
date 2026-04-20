@@ -239,7 +239,9 @@ class _FakeSession:
         self._log = log
 
     def run(self, query: str, **params):
-        self._log.append((query.strip().split("\n", 1)[0], params))
+        # Store the FULL stripped query so tests can assert on multi-line
+        # patterns (e.g. [r:WORKS_AT] appears on line 3 of edge MERGE).
+        self._log.append((query.strip(), params))
         return _FakeResult(params)
 
     def close(self):  # pragma: no cover
@@ -251,11 +253,30 @@ class _FakeResult:
         self._params = params
 
     def single(self):
-        # Return a record that looks like {"gid": "system"} for group_id lookups.
+        # Return a record that looks generic enough for group_id lookup
+        # AND for Page.from_record upserts (which expects props dict).
         class R:
+            def __init__(self_inner, params):
+                self_inner._params = params
+                # Synthesize a page-ish prop bag for any 'p' lookup.
+                self_inner._page_props = {
+                    "slug": params.get("slug") or params.get("from_slug") or "x",
+                    "domain": params.get("domain") or params.get("from_domain") or "",
+                    "compiled_truth": params.get("compiled_truth", "") or "",
+                    "created_at": "t",
+                    "updated_at": "t",
+                }
+
             def __getitem__(self_inner, key):
+                if key in ("gid", "n"):
+                    return "system" if key == "gid" else 0
+                if key == "p":
+                    return self_inner._page_props
+                if key == "r":
+                    return {"at": "t", "summary": ""}
                 return "system"
-        return R()
+
+        return R(self._params)
 
 
 class TestDetectLayerWarning:
@@ -332,3 +353,185 @@ class TestDetectLayerWarning:
             group_id="navi",
         )
         assert ep_id is not None
+
+
+# ── Run 2: Page + typed-edge maintenance on record_episode ───────────
+
+
+class TestPageMaintenance:
+    """Run 2: record_episode now maintains Pages + typed edges.
+
+    Assertions inspect the Cypher issued by the recorder against a
+    fake driver — integration tests (live Neo4j) live elsewhere.
+    """
+
+    def test_page_merge_on_first_mention(self):
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        content = (
+            "[FACT] Alice Cooper works at Foundry Inc. We decided to bring "
+            "her onto the platform team this quarter."
+        )
+        ep_id = recorder.record_episode(
+            session_id="test-session",
+            content=content,
+            episode_type="fact",
+            group_id="foundry",
+        )
+        assert ep_id is not None
+
+        # Expect at least one MERGE (p:Page ... slug: ...) for an entity.
+        page_merges = [q for q, _ in driver.calls if "MERGE (p:Page {slug:" in q]
+        assert page_merges, f"expected Page MERGE; got {[q[:80] for q, _ in driver.calls]}"
+
+    def test_typed_edge_materialized(self):
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        recorder.record_episode(
+            session_id="test-session",
+            content=(
+                "[FACT] Alice Cooper works at Foundry Inc on the platform team. "
+                "Important relationship; decided to prioritize onboarding."
+            ),
+            episode_type="fact",
+            group_id="foundry",
+        )
+        # create_edges_in_tx issues a MERGE with the edge type embedded.
+        edge_mergers = [q for q, _ in driver.calls if "[r:WORKS_AT]" in q]
+        assert edge_mergers, (
+            f"expected WORKS_AT edge MERGE; got types: "
+            f"{[q[:120] for q, _ in driver.calls if 'MERGE' in q]}"
+        )
+
+    def test_timeline_append_on_every_referenced_page(self):
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        recorder.record_episode(
+            session_id="test-session",
+            content=(
+                "[FACT] Alice Cooper works at Foundry Inc. Important context: "
+                "we decided to keep her reporting line flat for at least six months."
+            ),
+            episode_type="fact",
+            group_id="foundry",
+        )
+        # EVIDENCED_BY edge creation happens via append_timeline_entry.
+        evidenced_calls = [q for q, _ in driver.calls if "[r:EVIDENCED_BY]" in q]
+        assert evidenced_calls, (
+            f"expected EVIDENCED_BY MERGE; got: {[q[:80] for q, _ in driver.calls]}"
+        )
+
+    def test_zero_entity_refs_still_writes_episode(self):
+        """No proper nouns in content → no Page work, but the episode still writes."""
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        content = (
+            "completed today's refactor; shipped to staging. "
+            "decided to roll forward on the plan rather than revert."
+        )
+        ep_id = recorder.record_episode(
+            session_id="test-session",
+            content=content,
+            episode_type="fact",
+            group_id="system",
+        )
+        assert ep_id is not None
+        # Still performed the Episode CREATE.
+        assert any("CREATE (e:Episode" in q for q, _ in driver.calls)
+
+    def test_none_episode_type_works(self):
+        """Back-compat: episode_type=None goes through classifier.classify_memory
+        then Page maintenance. Must not raise."""
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        ep_id = recorder.record_episode(
+            session_id="test-session",
+            content="[FACT] Alice Cooper works at Foundry Inc. Decided to hire her.",
+            episode_type=None,
+            group_id="foundry",
+        )
+        assert ep_id is not None
+
+    def test_page_maintenance_failure_does_not_lose_episode(self):
+        """If Page maintenance raises, the episode is still returned."""
+        driver = _FakeDriver()
+
+        # Monkey-patch _maintain_pages_for_episode to explode.
+        recorder = EpisodeRecorder(driver=driver)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated page-maintenance failure")
+
+        recorder._maintain_pages_for_episode = _boom  # type: ignore[assignment]
+
+        ep_id = recorder.record_episode(
+            session_id="test-session",
+            content=(
+                "[FACT] Alice Cooper works at Foundry Inc. Decided to hire her "
+                "onto the platform team. Important precedent."
+            ),
+            episode_type="fact",
+            group_id="foundry",
+        )
+        # Episode still persisted (we caught the exception).
+        assert ep_id is not None
+
+    def test_ephemeral_content_skips_page_creation(self):
+        """A session-ephemeral-looking episode should NOT seed Pages."""
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+
+        recorder.record_episode(
+            session_id="test-session",
+            content=(
+                "earlier in this conversation we decided to push it to next "
+                "week — just making sure you remember the plan."
+            ),
+            episode_type="ephemeral",
+            group_id="system",
+        )
+        page_merges = [q for q, _ in driver.calls if "MERGE (p:Page {slug:" in q]
+        assert page_merges == [], (
+            f"expected zero Page MERGEs for ephemeral content; got {page_merges}"
+        )
+
+
+# ── Run 2: performance guard ────────────────────────────────────────
+
+
+def test_record_episode_page_maintenance_under_50ms():
+    """Page maintenance (in-memory, fake-driver) adds < 50 ms overhead.
+
+    The fake driver short-circuits every .run() call in microseconds, so
+    the measured number is extraction + orchestration, not DB latency.
+    Per spec §B5 the real DB-backed budget is 50 ms; our fake-driver
+    budget is a tight overhead proxy.
+    """
+    import time
+
+    driver = _FakeDriver()
+    recorder = EpisodeRecorder(driver=driver)
+
+    content = (
+        "[FACT] Alice Cooper works at Foundry Inc on the platform team. "
+        "Bob Jones founded Navi Systems last year. "
+        "Carol Smith advises Catalyst Partners. Decided to document these."
+    )
+
+    start = time.perf_counter()
+    ep_id = recorder.record_episode(
+        session_id="test-session",
+        content=content,
+        episode_type="fact",
+        group_id="system",
+    )
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+    assert ep_id is not None
+    # Generous envelope — test sanity check, not a hard SLA.
+    assert elapsed_ms < 50.0, f"record_episode took {elapsed_ms:.2f}ms, expected < 50ms"

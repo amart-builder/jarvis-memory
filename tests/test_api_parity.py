@@ -138,3 +138,49 @@ def test_tool_surface_available_via_client():
         data = resp.json()
         assert "status" in data
         assert "version" in data
+
+
+# ── Run 2: 4 new /api/v2 endpoints — shape contracts ────────────────
+
+
+@neo4j_required
+def test_orphans_response_shape(client: TestClient):
+    """GET /api/v2/orphans returns {count, by_domain}."""
+    resp = client.get("/api/v2/orphans")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert "count" in payload, payload
+    assert "by_domain" in payload, payload
+    assert isinstance(payload["count"], int)
+    assert isinstance(payload["by_domain"], dict)
+
+
+@neo4j_required
+def test_doctor_response_shape(client: TestClient):
+    """GET /api/v2/doctor returns {overall, checks, summary}."""
+    resp = client.get("/api/v2/doctor?fast=true")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    for key in ("overall", "checks", "summary"):
+        assert key in payload, payload
+    assert payload["overall"] in {"PASS", "WARN", "FAIL"}
+    assert isinstance(payload["checks"], dict)
+
+
+@neo4j_required
+def test_list_pages_response_shape(client: TestClient):
+    """GET /api/v2/pages returns {count, pages}."""
+    resp = client.get("/api/v2/pages?limit=5")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert "count" in payload
+    assert "pages" in payload
+    assert isinstance(payload["pages"], list)
+
+
+@neo4j_required
+def test_get_page_404_when_missing(client: TestClient):
+    """GET /api/v2/page/{slug} returns 404 for non-existent slug."""
+    resp = client.get("/api/v2/page/run-2-nonexistent-canary-slug-abc123")
+    # 404 is the contract for missing
+    assert resp.status_code == 404, resp.text

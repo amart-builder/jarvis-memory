@@ -173,6 +173,88 @@ class SaveStateRequest(BaseModel):
     files_modified: list[str] = []
 
 
+# === RUN 2 — ENTITY LAYER ===
+# 4 REST endpoints surfacing the Page + typed-edge knowledge graph:
+#   GET /api/v2/orphans     — find_orphans
+#   GET /api/v2/doctor      — run_health_checks
+#   GET /api/v2/page/{slug} — get_page
+#   GET /api/v2/pages       — list_pages
+# Response shapes mirror the MCP tool returns. All 503 if Neo4j is
+# unreachable (same pattern as the rest of /api/v2).
+
+@app.get("/api/v2/orphans")
+async def run2_orphans(domain: Optional[str] = None):
+    """Find Pages with zero inbound typed edges, grouped by domain."""
+    try:
+        from .orphans import find_orphans
+
+        driver = _get_driver()
+        grouped = find_orphans(domain=domain, driver=driver)
+        return {
+            "count": sum(len(v) for v in grouped.values()),
+            "by_domain": {d: [p.to_dict() for p in pages] for d, pages in grouped.items()},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"orphans failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/doctor")
+async def run2_doctor(fast: bool = False):
+    """Run entity-layer health checks; returns report dict."""
+    try:
+        from .doctor import run_health_checks
+
+        driver = _get_driver()
+        return run_health_checks(driver=driver, fast=fast)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"doctor failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/page/{slug}")
+async def run2_get_page(slug: str):
+    """Fetch a single Page by slug."""
+    try:
+        from .pages import get_page
+
+        driver = _get_driver()
+        page = get_page(slug, driver=driver)
+        if page is None:
+            raise HTTPException(status_code=404, detail=f"Page '{slug}' not found")
+        return {"page": page.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"get_page failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/pages")
+async def run2_list_pages(
+    domain: Optional[str] = None,
+    limit: int = 100,
+):
+    """List Pages, optionally filtered by domain, newest-first."""
+    try:
+        from .pages import list_pages
+
+        driver = _get_driver()
+        pages = list_pages(domain=domain, driver=driver, limit=limit)
+        return {"count": len(pages), "pages": [p.to_dict() for p in pages]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"list_pages failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# === END RUN 2 — ENTITY LAYER ===
+
+
 # ── Health ──────────────────────────────────────────────────────────────
 
 @app.get("/health")

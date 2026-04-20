@@ -456,3 +456,114 @@ def detect_layer(content: str, episode_type: Optional[str] = None) -> tuple[Laye
     if best_layer == "world_knowledge":
         return "world_knowledge", round(wk_conf, 2)
     return best_layer, round(best_conf, 2)
+
+
+# ── Run 2: entity-reference extraction ───────────────────────────────
+#
+# Spec: brain/projects/jarvis-memory/plans/runs/2026-04-20-entity-layer/spec.md.
+#
+# ``extract_entity_references`` is a lightweight companion to
+# ``graph.extract_typed_edges``. Typed edges are *specific* (WORKS_AT,
+# INVESTED_IN, ...) while entity refs are just "this episode talks about
+# X" — used by ``record_episode`` to guarantee every referenced entity
+# has an ambient Page, even if no typed edge fires.
+#
+# Returns a list of ``EntityRef`` that callers use to seed Page creation.
+# Deterministic, no LLM.
+
+from dataclasses import dataclass  # noqa: E402 (module-level imports already done above; keep local alias scope clean)
+
+
+@dataclass(frozen=True)
+class EntityRef:
+    """A mention of an entity in episode content.
+
+    ``slug`` is the canonical Page key; ``domain`` is a best-effort
+    category; ``display`` preserves the surface form for logging.
+    """
+
+    slug: str
+    domain: str
+    display: str
+
+
+# Domain hints from phrase context. Ordered; first match wins.
+# Patterns are applied *around* a proper noun match to pick a domain.
+_DOMAIN_CONTEXT_HINTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(company|startup|firm|fund|LLC|Inc\.?|Corp\.?)\b", re.IGNORECASE), "company"),
+    (re.compile(r"\b(project|initiative|codebase|repo|service)\b", re.IGNORECASE), "project"),
+    (re.compile(r"\b(person|founder|CEO|CTO|engineer|advisor|investor)\b", re.IGNORECASE), "person"),
+    (re.compile(r"\b(concept|pattern|framework|methodology|approach)\b", re.IGNORECASE), "concept"),
+    (re.compile(r"\b(infrastructure|database|server|cluster|system)\b", re.IGNORECASE), "system"),
+]
+
+
+def _guess_domain(noun: str, surrounding_window: str) -> str:
+    """Infer a domain for a detected proper noun from its sentence context."""
+    for pattern, domain in _DOMAIN_CONTEXT_HINTS:
+        if pattern.search(surrounding_window):
+            return domain
+    # Heuristic: single capitalized word = likely person or place.
+    if " " not in noun:
+        return "person" if noun[0].isupper() and len(noun) <= 12 else "topic"
+    return "topic"
+
+
+def extract_entity_references(
+    content: str,
+    episode_type: Optional[str] = None,
+) -> list[EntityRef]:
+    """Extract entity references from an episode body.
+
+    Uses the same proper-noun pattern as ``graph._extract_proper_nouns``
+    but exposes a stable public surface. Filters via ``detect_layer``:
+
+    * If layer == ``session_ephemeral`` with confidence > 0.7, we suppress
+      extraction (the content is probably a pronoun-heavy chat fragment
+      about the current session, not durable world knowledge).
+    * If layer == ``agent_operations`` with confidence > 0.7, we also
+      suppress extraction (preferences/config don't need Page timelines).
+
+    Args:
+        content: Episode body.
+        episode_type: Optional caller-supplied type.
+
+    Returns:
+        Deduplicated list of ``EntityRef``. Order is stable: by slug.
+        Empty list on empty / ambiguous input.
+    """
+    if not content:
+        return []
+
+    # Gate: if detect_layer strongly predicts non-world-knowledge, skip.
+    try:
+        layer, conf = detect_layer(content, episode_type)
+        if layer != "world_knowledge" and conf > 0.7:
+            return []
+    except Exception:  # noqa: BLE001 — advisory only
+        pass
+
+    # Import locally to avoid a circular import at module load
+    # (graph.py imports pages; classifier is loaded very early).
+    from .graph import _extract_proper_nouns  # type: ignore
+    from .pages import slugify  # type: ignore
+
+    nouns = _extract_proper_nouns(content)
+    if not nouns:
+        return []
+
+    seen: set[str] = set()
+    refs: list[EntityRef] = []
+    for noun, start in nouns:
+        slug = slugify(noun)
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        # Grab ~60 chars around the mention for domain inference.
+        left = max(0, start - 30)
+        right = min(len(content), start + len(noun) + 30)
+        window = content[left:right]
+        domain = _guess_domain(noun, window)
+        refs.append(EntityRef(slug=slug, domain=domain, display=noun))
+
+    return sorted(refs, key=lambda r: r.slug)
