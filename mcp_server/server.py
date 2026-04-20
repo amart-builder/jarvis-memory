@@ -1,21 +1,22 @@
-"""Jarvis Memory MCP Server v2 — Semantic search, temporal facts, structured metadata.
+"""Jarvis Memory MCP Server — semantic search, typed graph, temporal facts.
 
-32 tools total: Jarvis extensions (17) + Conversation (6) + v2 additions (4) + Graphiti base (5)
+27 tools total (see tests/test_mcp_parity.py for the locked name set).
+Tool surface is frozen by parity tests; additions or renames require a PR
+that bumps the count there.
 
-v2 ADDITIONS:
-  29. wake_up             — Token-budgeted context loading (Layer 0 + Layer 1)
-  30. set_fact_validity   — Set temporal validity bounds on facts (valid_from/valid_to)
-  31. fact_timeline       — Chronological fact history for an entity
-  32. search_rooms        — List rooms with memory counts for a project
+Tool groups (at a glance):
+  - Search / recall: scored_search, wake_up, search_rooms, fact_timeline
+  - Writes:          save_episode, save_state, session_handoff
+  - Sessions:        list_sessions, get_session, continue_session
+  - Lifecycle:       lifecycle_status, lifecycle_transition,
+                     classify_memory, supersede_memory, contradict_memory,
+                     set_fact_validity, restore_memory, bulk_archive_stale
+  - Compaction:      compact_session, compact_daily, compact_weekly,
+                     compaction_status
+  - Stats / utility: memory_stats
 
-UPGRADED:
-  - scored_search: now uses ChromaDB semantic embeddings + room/hall/as_of filtering
-  - classify_memory: now returns confidence + sentiment when detailed=True
-  - contradict_memory: auto-sets valid_to on contradicted memory
-  - supersede_memory: auto-sets valid_to on superseded memory
-  - save_episode: dual-writes to Neo4j + ChromaDB
-
-Run: python -m mcp_server.server
+Run:  python -m mcp_server.server   (preferred)
+      jarvis-mcp                     (pip console script — Run 3 fix)
 """
 from __future__ import annotations
 
@@ -1161,8 +1162,13 @@ async def main():
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-if __name__ == "__main__":
+def main_sync() -> None:
+    """Synchronous entrypoint for the ``jarvis-mcp`` console script."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    main_sync()
 
 
 # === TRUST BOUNDARY — RUN 4 ===
