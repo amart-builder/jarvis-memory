@@ -425,103 +425,52 @@ async def wake_up(req: WakeUpRequest):
 
 @app.post("/api/v2/scored_search")
 async def scored_search(req: ScoredSearchRequest):
-    """Semantic search with composite scoring and room/hall/temporal filters.
+    """Hybrid RRF scored search with intent routing + Haiku expansion.
 
-    Uses ChromaDB for real semantic similarity when available,
-    falls back to Neo4j text matching.
+    Implementation notes (Run 3):
+        The heavy lifting lives in :func:`jarvis_memory.scoring.scored_search`
+        — ChromaDB vector + Neo4j full-text are fused via RRF, then
+        boosted by Page.compiled_truth and typed-edge backlinks. The
+        response envelope here is FROZEN (spec Run 3 §"Must-not-break
+        flows") — any change must be a separate contract change.
+
+    Legacy fallback:
+        Setting ``JARVIS_SEARCH_LEGACY=1`` forces the Run 1 composite
+        scoring path inside ``jarvis_memory.scoring.scored_search``.
     """
     try:
-        from .scoring import score_results
-        from .rooms import detect_room, get_hall
-        from .temporal import filter_by_date
+        import os as _os
+
+        from .scoring import scored_search as core_scored_search
 
         store = _get_embed_store()
         driver = _get_driver()
-        results = []
 
-        # Try ChromaDB semantic search first
-        if store and store.health_check():
-            try:
-                where_filter = {}
-                if req.group_id:
-                    where_filter["wing"] = req.group_id
-                if req.room:
-                    where_filter["room"] = req.room
-                if req.hall:
-                    where_filter["hall"] = req.hall
-                if req.memory_type:
-                    where_filter["memory_type"] = req.memory_type
+        results = core_scored_search(
+            req.query,
+            group_id=req.group_id,
+            room=req.room,
+            hall=req.hall,
+            memory_type=req.memory_type,
+            as_of=req.as_of,
+            limit=req.limit,
+            driver=driver,
+            embedding_store=store,
+        )
 
-                chromadb_results = store.search(
-                    query=req.query,
-                    n_results=min(req.limit * 3, 60),
-                    where=where_filter if where_filter else None,
-                )
-
-                # Enrich with Neo4j metadata
-                for cr in chromadb_results:
-                    mem_id = cr["id"]
-                    try:
-                        with driver.session() as db:
-                            node = db.run(
-                                "MATCH (n) WHERE n.uuid = $uid RETURN n",
-                                uid=mem_id,
-                            ).single()
-                            if node:
-                                props = dict(node["n"])
-                                props["similarity"] = cr.get("similarity", 0.7)
-                                results.append(props)
-                    except Exception:
-                        results.append({
-                            "uuid": mem_id,
-                            "content": cr.get("document", ""),
-                            "similarity": cr.get("similarity", 0.7),
-                            **cr.get("metadata", {}),
-                        })
-            except Exception as e:
-                logger.warning(f"ChromaDB search failed, falling back to Neo4j: {e}")
-
-        # Fallback: Neo4j text search
-        if not results:
-            try:
-                with driver.session() as db:
-                    cypher = """
-                        MATCH (n)
-                        WHERE (n.content CONTAINS $q OR n.name CONTAINS $q
-                               OR n.summary CONTAINS $q)
-                    """
-                    params = {"q": req.query, "lim": req.limit * 2}
-                    if req.group_id:
-                        cypher += " AND n.group_id = $gid"
-                        params["gid"] = req.group_id
-                    if req.room:
-                        cypher += " AND n.room = $room"
-                        params["room"] = req.room
-                    if req.hall:
-                        cypher += " AND n.hall = $hall"
-                        params["hall"] = req.hall
-                    cypher += """
-                        AND coalesce(n.lifecycle_status, 'active') IN ['active', 'confirmed']
-                        RETURN n ORDER BY n.created_at DESC LIMIT $lim
-                    """
-                    rows = db.run(cypher, **params)
-                    results = [dict(r["n"]) for r in rows]
-            except Exception as e:
-                logger.warning(f"Neo4j fallback search failed: {e}")
-
-        # Temporal filter
-        if req.as_of:
-            results = filter_by_date(results, as_of=req.as_of)
-
-        # Composite scoring
-        scored = score_results(results)
+        if _os.environ.get("JARVIS_SEARCH_LEGACY", "").strip() == "1":
+            search_mode = "legacy_composite"
+        elif store and store.health_check():
+            search_mode = "hybrid_rrf"
+        else:
+            search_mode = "neo4j_text"
 
         return {
-            "results": scored[: req.limit],
-            "count": min(len(scored), req.limit),
+            "results": results[: req.limit],
+            "count": min(len(results), req.limit),
             "query": req.query,
             "group_id": req.group_id,
-            "search_mode": "semantic" if store and store.health_check() else "neo4j_text",
+            "search_mode": search_mode,
             "filters": {
                 "room": req.room,
                 "hall": req.hall,

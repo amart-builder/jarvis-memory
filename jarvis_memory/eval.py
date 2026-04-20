@@ -466,56 +466,51 @@ def _teardown_test_namespace(driver: Any, client: Any) -> None:
 
 
 def _make_scored_search_fn(collection: Any, driver: Any) -> SearchFn:
-    """Build a search closure that mirrors prod ``scored_search`` logic.
+    """Build a search closure that exercises prod ``scored_search`` logic.
 
-    Uses the isolated TestEpisode namespace. Runs:
-      1. ChromaDB semantic similarity against the test collection (top 3k).
-      2. Fetch node props from :TestEpisode for each hit.
-      3. Composite-score via ``scoring.score_results`` and sort desc.
+    Run 3 update: the eval now drives :func:`jarvis_memory.scoring.scored_search`,
+    which in turn runs the hybrid RRF pipeline (Chroma + Neo4j full-text +
+    expansion + Page boosts). The isolated :TestEpisode namespace is
+    passed through so the search stays namespaced.
 
-    Returns the top-k uuids.
+    ``JARVIS_SEARCH_LEGACY=1`` routes internally to the Run 1 composite
+    path for baseline comparison.
     """
-    from .scoring import score_results
+    from .scoring import scored_search as _scored_search
 
-    def _search(query: str, k_max: int) -> list[str]:
-        n_results = max(k_max * 3, 10)
+    def _vector_fn(q: str, n: int) -> list[dict[str, Any]]:
         try:
-            cr = collection.query(
-                query_texts=[query],
-                n_results=n_results,
-            )
+            cr = collection.query(query_texts=[q], n_results=n)
         except Exception as e:  # pragma: no cover
             logger.warning("chroma query failed: %s", e)
             return []
-
         ids = cr.get("ids", [[]])[0] if cr else []
         distances = cr.get("distances", [[]])[0] if cr else [0.0] * len(ids)
         metadatas = cr.get("metadatas", [[]])[0] if cr else [{}] * len(ids)
-
-        enriched: list[dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for idx, uid in enumerate(ids):
             dist = distances[idx] if idx < len(distances) else 0.0
             similarity = max(0.0, 1.0 - (dist / 2.0))
             meta = metadatas[idx] if idx < len(metadatas) else {}
+            out.append(
+                {
+                    "id": uid,
+                    "uuid": uid,
+                    "similarity": similarity,
+                    "metadata": dict(meta) if meta else {},
+                }
+            )
+        return out
 
-            record: dict[str, Any] = {"uuid": uid, "similarity": similarity}
-            # Fetch the Neo4j node props for accurate composite scoring.
-            try:
-                with driver.session() as db:
-                    node = db.run(
-                        f"MATCH (n:{TEST_NEO4J_LABEL} {{uuid: $uid}}) RETURN n",
-                        uid=uid,
-                    ).single()
-                    if node:
-                        record.update(dict(node["n"]))
-                        record["similarity"] = similarity
-            except Exception as e:  # pragma: no cover
-                logger.debug("neo4j enrich failed for %s: %s", uid, e)
-                record.update(meta)
-            enriched.append(record)
-
-        scored = score_results(enriched, similarity_key="similarity")
-        return [str(r.get("uuid", "")) for r in scored[:k_max] if r.get("uuid")]
+    def _search(query: str, k_max: int) -> list[str]:
+        results = _scored_search(
+            query,
+            limit=k_max,
+            driver=driver,
+            namespace=TEST_NEO4J_LABEL,
+            vector_search_fn=_vector_fn,
+        )
+        return [str(r.get("uuid") or r.get("id") or "") for r in results if (r.get("uuid") or r.get("id"))]
 
     return _search
 
