@@ -1,14 +1,32 @@
 # Jarvis Memory
 
-Shared, persistent memory for Alex's AI systems (OpenClaw on Mac Mini, Claude Code on MacBook Pro, crons, plugins). Both systems read and write to the same Neo4j + ChromaDB backend, so decisions made in one surface are immediately visible to the other.
+Shared, persistent memory for an agent fleet (OpenClaw on Mac Mini, Claude Code / Desktop, crons, plugins). Multiple writers share one Neo4j + ChromaDB backend, so a decision recorded from one surface is immediately visible in every other.
 
 ## What problem it solves
 
 - Claude forgets between sessions. Compaction erases context.
-- OpenClaw and Claude need to see the same memories, or they diverge.
+- Multiple AI systems need to see the same memories, or they diverge.
 - Useful memories (decisions, plans, corrections) need structure so they're retrievable weeks later.
 
-Jarvis is a two-layer store with auto-tagging, semantic search, temporal facts, and compaction — designed to be the canonical shared backend for cross-system continuity.
+Jarvis is a typed-graph store with hybrid RRF search, compiled-truth entity pages, temporal facts, and a dream-cycle compactor — designed to be the canonical shared backend for cross-system continuity.
+
+## Quick start
+
+```bash
+git clone https://github.com/amart-builder/jarvis-memory.git
+cd jarvis-memory
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"                            # dev deps include pytest
+cp .env.example .env                               # fill in NEO4J_* and ANTHROPIC_API_KEY
+python scripts/migrate_to_v2.py                    # apply Run 2 entity-layer schema
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"  # pre-cache embedding model
+bash scripts/verify_install.sh                     # 30-second sanity check
+python -m jarvis_memory.api                        # REST on :3500
+```
+
+`scripts/verify_install.sh` is the authoritative "is this install healthy?" check — 7 gates covering imports, entrypoints, Neo4j connectivity, schema state, ChromaDB, core flows, and the MCP tool surface.
+
+**Note on `setup.sh`:** deprecated — hardcodes a two-machine MBP/Mini assumption that no longer applies. Fresh installs use the steps above. `setup.sh` refuses to run without `JARVIS_LEGACY_SETUP=1`.
 
 ## Architecture
 
@@ -20,7 +38,7 @@ Jarvis is a two-layer store with auto-tagging, semantic search, temporal facts, 
 │       │                           │                    │     │
 │       ▼                           ▼                    ▼     │
 │  REST API                    MCP server         Python import│
-│  localhost:3500              23 tools           direct       │
+│  localhost:3500              27 tools           direct       │
 └──────────┬─────────────────────┬─────────────────────┬───────┘
            │                     │                     │
            ▼                     ▼                     ▼
@@ -39,11 +57,20 @@ Jarvis is a two-layer store with auto-tagging, semantic search, temporal facts, 
        (Mac Mini over Tailscale)       (local sidecar)
 ```
 
-- **Neo4j** is authoritative. Every Episode, Entity, Session, Snapshot lives here.
+- **Neo4j** is authoritative. Episodes, Entities, Pages, Sessions, Snapshots, typed edges.
 - **ChromaDB** is a read-optimized embedding sidecar for semantic search. Can be rebuilt from Neo4j at any time (`EmbeddingStore.rebuild_from_neo4j()`).
-- **REST API** on `localhost:3500` (Mini only) exposes v1 + v2 endpoints for OpenClaw hooks.
-- **MCP server** exposes 23 tools to Claude Code. Connects to Neo4j over Tailscale.
+- **REST API** on `localhost:3500` exposes v1 + v2 endpoints (used by OpenClaw + generic HTTP clients).
+- **MCP server** exposes 27 tools to any MCP client (Claude Code, Claude Desktop). Parity-locked by `tests/test_mcp_parity.py`.
 - **Python package** is importable for direct access from scripts, crons, and hooks.
+
+### What's inside (gbrain-import features, merged 2026-04-20)
+
+- **Typed-edge graph + `:Page` entities** (`jarvis_memory.pages`, `graph`, `schema_v2`) — compiled-truth snapshots, typed relationships (`WORKS_AT`, `FOUNDED`, `DECIDED_ON`, …), orphan detection, doctor command.
+- **RRF hybrid search + intent classifier + Haiku multi-query expansion** (`jarvis_memory.search.*`) — `scored_search` now fuses Chroma vector results with Neo4j fulltext, routes by intent (`entity/temporal/event/general`), and fans out via Claude Haiku 4-5 (fails-open if `ANTHROPIC_API_KEY` is unset). `JARVIS_SEARCH_LEGACY=1` reverts to the pre-RRF composite scorer for A/B or rollback.
+- **Dream-cycle compaction** — daily cron now also runs `fix_citations`, `report_orphans`, `reconcile_stale_edges` subphases. Read-only hygiene; logs findings without mutating data.
+- **Minions** (`jarvis_memory.minions.*`, `data/minions.sqlite`) — SQLite-backed deterministic job queue. Shell handler is gated behind `GBRAIN_ALLOW_SHELL_JOBS=1`; default off.
+- **OperationContext trust boundary** (`jarvis_memory.operation_context`) — every write tagged `source=mcp|rest|cli`, `remote=True|False` for audit.
+- **Retrieval eval harness** (`jarvis_memory.eval`, `tests/eval_data/synthetic_*.jsonl`) — run `python -m jarvis_memory.eval ...` to measure R@k / MRR / nDCG. Baseline floor: R@5 ≥ 0.640, MRR ≥ 0.756, nDCG@10 ≥ 0.683.
 
 ## Memory model
 
@@ -169,36 +196,56 @@ jarvis-memory/
 ├── .env.example               ← template
 ├── pyproject.toml
 ├── setup.sh / setup_venv.sh   ← bootstrap
-├── jarvis_memory/             ← core package
-│   ├── api.py                 ← FastAPI REST server
-│   ├── config.py              ← env loading
-│   ├── conversation.py        ← SessionManager, EpisodeRecorder, SnapshotManager
-│   ├── embeddings.py          ← ChromaDB wrapper
-│   ├── compaction.py          ← 3-tier dedup
-│   ├── lifecycle.py           ← state machine (active/archived/superseded/...)
-│   ├── rooms.py               ← 70+ keyword room detection + hall mapping
-│   ├── scoring.py             ← composite semantic × recency × importance
-│   ├── temporal.py            ← valid_from/valid_to fact management
-│   ├── classifier.py          ← 21-type memory classifier
-│   ├── wake_up.py             ← token-budgeted session-start context
-│   └── backfill_v2.py         ← migration helper
+├── jarvis_memory/                ← core package
+│   ├── api.py                    ← FastAPI REST server (v1 compat + /api/v2/*)
+│   ├── config.py                 ← env loading
+│   ├── conversation.py           ← SessionManager, EpisodeRecorder, SnapshotManager
+│   ├── embeddings.py             ← ChromaDB wrapper
+│   ├── compaction.py             ← 3-tier dedup + dream-cycle hygiene phases
+│   ├── lifecycle.py              ← state machine (active/archived/superseded/...)
+│   ├── rooms.py                  ← 70+ keyword room detection + hall mapping
+│   ├── scoring.py                ← scored_search (RRF + intent + expansion; legacy composite behind env flag)
+│   ├── temporal.py               ← valid_from/valid_to fact management
+│   ├── classifier.py             ← 21-type memory classifier
+│   ├── wake_up.py                ← token-budgeted session-start context
+│   ├── schema_v2.py              ← Run 2 Neo4j schema (:Page, typed edges)
+│   ├── pages.py / graph.py       ← Page CRUD + typed-edge extraction
+│   ├── orphans.py / doctor.py    ← orphan detection + health reporter
+│   ├── operation_context.py      ← OperationContext trust boundary (Run 4)
+│   ├── search/                   ← RRF hybrid search (Run 3)
+│   │   ├── rrf.py                ← reciprocal-rank fusion
+│   │   ├── keyword.py            ← Neo4j fulltext search
+│   │   ├── boosts.py             ← compiled-truth + backlink boosts
+│   │   ├── intent.py             ← rule-based query intent classifier
+│   │   └── expansion.py          ← Haiku-backed multi-query expansion (fails-open)
+│   ├── minions/                  ← SQLite job queue (Run 4)
+│   │   ├── queue.py              ← MinionQueue with BEGIN IMMEDIATE locking
+│   │   ├── worker.py             ← MinionWorker (stdio + launchd)
+│   │   └── handlers/             ← built-in handlers (compact, shell-gated)
+│   ├── eval.py                   ← retrieval eval harness (R@k / MRR / nDCG)
+│   └── backfill_v2.py            ← back-populate legacy data into Run 2 schema
 ├── mcp_server/
-│   └── server.py              ← MCP tool surface (23 tools)
-├── hooks/                     ← event hooks
-│   ├── claude_code_precompact.py
-│   ├── claude_code_sessionstart.py
-│   ├── pre_compact.py
-│   ├── session_start.py
-│   └── session_stop.py
-├── launchagents/              ← macOS launchd plists
+│   └── server.py                 ← MCP tool surface (27 tools, parity-locked)
+├── hooks/                        ← event hooks (Claude Code + OpenClaw)
+├── launchagents/                 ← macOS launchd plists
 │   ├── com.atlas.jarvis-compact-daily.plist
 │   ├── com.atlas.jarvis-compact-weekly.plist
+│   ├── com.atlas.minion-worker.plist  ← Run 4 worker (not loaded by default)
 │   └── INSTALL_COMPACTION_CRON.md
 ├── scripts/
-│   ├── run_compaction.py      ← cron runner
+│   ├── run_compaction.py         ← cron runner (daily + weekly tiers, dream-cycle)
+│   ├── migrate_to_v2.py          ← idempotent Run 2 schema migration
+│   ├── gen_eval_corpus.py        ← synthetic corpus generator (Opus-4.7 backed)
+│   ├── verify_install.sh         ← 30-second post-install sanity check
 │   └── backfill_v2.py
-├── chromadb/                  ← local vector store (not in git)
-└── tests/
+├── docs/eval/                    ← before/after eval reports per run
+├── tests/                        ← 514 tests
+│   ├── search/                   ← Run 3 (RRF, keyword, boosts, intent, expansion)
+│   ├── minions/                  ← Run 4 (queue, worker, handlers, shell, audit)
+│   └── eval_data/                ← synthetic_corpus_v1 / queries_v1 / qrels_v1
+├── data/                         ← SQLite (minions.sqlite), audit logs (gitignored)
+├── chromadb/                     ← local vector store (gitignored)
+└── audit/                        ← weekly-rotated shell-job audit trail (gitignored)
 ```
 
 ## Troubleshooting
@@ -231,6 +278,11 @@ Test Tailscale: `nc -zv 100.102.6.81 7687`. If down, Mac Mini is offline or Tail
 
 ## Recent changes
 
-- **2026-04-17**: Rename `yoniclaw` → `legacy-memclawz` (137 nodes). MCP save_episode group_id bug fix in `mcp_server/server.py`. PreCompact + SessionStart hooks for Claude Code. Compaction LaunchAgents. Embeddings backfilled. Room-detection fallback logging.
+- **2026-04-20 — gbrain import (4 runs, 514 tests, +36 from pre-import)**:
+    - *Run 1* — retrieval eval harness (P@k / R@k / MRR / nDCG), brain/memory/session routing rule, parity-lock tests.
+    - *Run 2* — `:Page` entity layer with `compiled_truth`/`timeline`, 8 typed edges, `orphans` + `doctor` commands, MCP surface 23 → 27 tools.
+    - *Run 3* — RRF hybrid search in `scored_search` (Chroma + Neo4j fulltext + compiled-truth/backlink boosts), rule-based intent classifier, Haiku-4-5 multi-query expansion with prompt-injection defense, dream-cycle compaction (`fix_citations`, `report_orphans`, `reconcile_stale_edges`). Eval delta: R@5 0.640 → 0.843, MRR 0.756 → 0.899, nDCG@10 0.683 → 0.841.
+    - *Run 4* — `MinionQueue` (SQLite-backed job queue with `BEGIN IMMEDIATE` claim locking), shell handler gated behind `GBRAIN_ALLOW_SHELL_JOBS`, `OperationContext` trust boundary tagging every write `source=mcp|rest|cli`.
+- **2026-04-17**: Rename `yoniclaw` → `legacy-memclawz` (137 nodes). MCP save_episode group_id bug fix. PreCompact + SessionStart hooks for Claude Code. Compaction LaunchAgents. Embeddings backfilled. Room-detection fallback logging.
 - **2026-04-07**: Cutover from MemClawz shim to standalone `jarvis_memory.api`. v1 compat layer preserved for OpenClaw hooks.
 - **v2 endpoints live** on `/api/v2/*` with room/hall auto-tagging and temporal fact management.
