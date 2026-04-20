@@ -72,8 +72,21 @@ _INJECTION_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"\[\s*/INST\s*\]", re.IGNORECASE),
     re.compile(r"###\s*(system|user|assistant|instruction)[:\s]*", re.IGNORECASE),
     re.compile(r"\b(system|assistant|user)\s*:\s*", re.IGNORECASE),
-    re.compile(r"ignore (all|any|previous|above|prior) (instructions?|rules?|prompts?)", re.IGNORECASE),
-    re.compile(r"disregard (all|any|previous|above|prior) (instructions?|rules?|prompts?)", re.IGNORECASE),
+    # Catch "ignore (all|any) (prior|previous|above|earlier) (instructions|rules|prompts)"
+    # with any subset of the adjectives in any order. Matches the common
+    # jailbreak patterns without needing every permutation listed.
+    re.compile(
+        r"ignore\s+(?:all|any|the|these|those|prior|previous|above|earlier|foregoing)"
+        r"(?:\s+(?:all|any|the|these|those|prior|previous|above|earlier|foregoing)){0,3}"
+        r"\s+(?:instructions?|rules?|prompts?|directives?|guidance|system\s*prompt)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"disregard\s+(?:all|any|the|these|those|prior|previous|above|earlier|foregoing)"
+        r"(?:\s+(?:all|any|the|these|those|prior|previous|above|earlier|foregoing)){0,3}"
+        r"\s+(?:instructions?|rules?|prompts?|directives?|guidance|system\s*prompt)",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -90,12 +103,18 @@ def sanitize_query_for_prompt(query: str) -> str:
     if not query:
         return ""
     cleaned = str(query)
-    # Drop control characters (except tab). Keeping \t helps search
-    # queries that incidentally copy-pasted whitespace.
-    cleaned = "".join(ch for ch in cleaned if ch == "\t" or ch.isprintable())
-    # Remove known injection patterns.
-    for pat in _INJECTION_PATTERNS:
-        cleaned = pat.sub(" ", cleaned)
+    # Replace control characters with a space so "system\nIgnore" does
+    # not glue into "systemIgnore" (which would defeat the
+    # word-boundary-anchored injection regexes below). Tab is kept as a
+    # space too — search queries almost never need raw tabs.
+    cleaned = "".join(
+        ch if (ch.isprintable() and ch != "\t") else " " for ch in cleaned
+    )
+    # Remove known injection patterns (two passes — the first pass can
+    # reveal patterns that were hidden behind ChatML-style markers).
+    for _ in range(2):
+        for pat in _INJECTION_PATTERNS:
+            cleaned = pat.sub(" ", cleaned)
     # Collapse whitespace.
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     # Hard cap length — defense in depth against pathological inputs.
