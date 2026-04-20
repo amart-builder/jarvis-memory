@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-jarvis-mcp = "mcp_server.server:main"
+jarvis-mcp = "mcp_server.server:main_sync"
 
 [tool.ruff]
 line-length = 120

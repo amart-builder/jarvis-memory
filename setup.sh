@@ -1,13 +1,36 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────
-# Jarvis Memory — Setup Script (Shared Brain Architecture)
+# Jarvis Memory — LEGACY Setup Script (DEPRECATED 2026-04-20)
 #
-# Supports two machine roles:
-#   - Mac Mini:    Neo4j runs locally, acts as the brain
-#   - MacBook Pro: Connects to Mac Mini's Neo4j remotely
+# This script hardcodes ~/Desktop/Jarvis/jarvis-memory and assumes a
+# two-machine MBP/Mini "brain / client" architecture that does NOT
+# apply to fresh installs.
 #
-# Run this on BOTH machines. The script auto-detects the role.
+# For a new install, use one of these instead:
+#   (1) Astack MEGA-PROMPT (autonomous OpenClaw install)  ← recommended
+#   (2) Manual install per README.md (Quick-start section)
+#   (3) bash setup_venv.sh  (just the Python venv + pip install)
+#
+# Re-run with JARVIS_LEGACY_SETUP=1 if you intentionally want Alex's
+# old MBP/Mini-pair behavior.
 # ──────────────────────────────────────────────────────────
+
+cat >&2 <<'WARN'
+
+  ⚠  setup.sh is DEPRECATED. Use one of:
+       bash setup_venv.sh                (Python venv + deps)
+       cp .env.example .env              (fill in Neo4j creds)
+       python scripts/migrate_to_v2.py   (apply Run 2 schema)
+       python -m jarvis_memory.api       (start REST on :3500)
+
+     Override with JARVIS_LEGACY_SETUP=1 if you really mean it.
+
+WARN
+
+if [[ "${JARVIS_LEGACY_SETUP:-0}" != "1" ]]; then
+    exit 2
+fi
+
 set -e
 
 JARVIS_DIR="$HOME/Desktop/Jarvis/jarvis-memory"
