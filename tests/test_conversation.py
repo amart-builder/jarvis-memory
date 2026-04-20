@@ -535,3 +535,170 @@ def test_record_episode_page_maintenance_under_50ms():
     assert ep_id is not None
     # Generous envelope — test sanity check, not a hard SLA.
     assert elapsed_ms < 50.0, f"record_episode took {elapsed_ms:.2f}ms, expected < 50ms"
+
+
+# ── Run 4: OperationContext-driven abuse audit on record_episode ─────
+
+
+class TestTrustBoundaryAudit:
+    """Run 4: ctx=OperationContext(remote=True) + abuse heuristic → WARNING.
+
+    All tests verify LOG-ONLY behavior: episodes are still persisted, calls
+    never raise due to the audit, and local/None ctx skips audit entirely.
+    """
+
+    def test_no_audit_when_ctx_is_none(self, caplog):
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        content = "rm -rf / is a dangerous command that we decided to never run."
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="decision",
+                group_id="system",
+                ctx=None,
+            )
+        assert ep_id is not None
+        assert not any(
+            "possible_abusive_remote_write" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_no_audit_when_ctx_is_local(self, caplog):
+        from jarvis_memory.operation_context import OperationContext
+
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        content = "rm -rf / — we decided never to run this in production."
+        ctx = OperationContext.for_cli("alex")
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="decision",
+                group_id="system",
+                ctx=ctx,
+            )
+        assert ep_id is not None
+        assert not any(
+            "possible_abusive_remote_write" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_remote_ctx_with_shell_payload_warns(self, caplog):
+        from jarvis_memory.operation_context import OperationContext
+
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        content = (
+            "We decided to never ship this — rm -rf / would nuke production. "
+            "The plan is to block any writes that look like shell payloads."
+        )
+        ctx = OperationContext.for_mcp("malicious-agent")
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="decision",
+                group_id="system",
+                ctx=ctx,
+            )
+        # Episode still persisted — LOG-ONLY means we don't refuse.
+        assert ep_id is not None
+        # Warning fired.
+        warnings = [
+            rec for rec in caplog.records
+            if "possible_abusive_remote_write" in rec.message
+        ]
+        assert len(warnings) == 1
+        text = warnings[0].message
+        assert "malicious-agent" in text
+        assert "mcp" in text
+        assert "rm" in text  # pattern name surfaced in reasons
+
+    def test_remote_ctx_with_nonstandard_group_id_warns(self, caplog):
+        from jarvis_memory.operation_context import OperationContext
+
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        content = "We decided to ship v2 of the scoring algorithm next sprint."
+        ctx = OperationContext.for_rest("10.0.0.5")
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="decision",
+                group_id="Weird Group With Spaces!",
+                ctx=ctx,
+            )
+        assert ep_id is not None
+        warnings = [
+            rec for rec in caplog.records
+            if "possible_abusive_remote_write" in rec.message
+        ]
+        assert len(warnings) == 1
+        assert "non_canonical_shape" in warnings[0].message
+
+    def test_remote_ctx_with_large_content_warns(self, caplog):
+        from jarvis_memory.operation_context import OperationContext
+
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        # Mix a significant keyword with a lot of filler so should_record passes.
+        content = "decided to paste: " + ("A" * 12_000)
+        ctx = OperationContext.for_mcp("bulk-writer")
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="decision",
+                group_id="system",
+                ctx=ctx,
+            )
+        assert ep_id is not None
+        warnings = [
+            rec for rec in caplog.records
+            if "possible_abusive_remote_write" in rec.message
+        ]
+        assert len(warnings) == 1
+        assert "content_over_10kb" in warnings[0].message
+
+    def test_remote_ctx_clean_content_does_not_warn(self, caplog):
+        from jarvis_memory.operation_context import OperationContext
+
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        content = (
+            "Decided to migrate the scoring weights from a flat config to a "
+            "tiered structure keyed by memory_type. Plan is to ship next sprint."
+        )
+        ctx = OperationContext.for_mcp("trusted-agent")
+        with caplog.at_level(logging.WARNING, logger="jarvis_memory.conversation"):
+            ep_id = recorder.record_episode(
+                session_id="test-session",
+                content=content,
+                episode_type="decision",
+                group_id="jarvis-memory",
+                ctx=ctx,
+            )
+        assert ep_id is not None
+        # No abuse warning.
+        assert not any(
+            "possible_abusive_remote_write" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_record_episode_signature_backward_compatible(self):
+        """Callers that don't know about ctx must still work (positional + keyword)."""
+        driver = _FakeDriver()
+        recorder = EpisodeRecorder(driver=driver)
+        content = "Decided to keep the legacy API shape for backward compat."
+        # Call WITHOUT ctx — pre-Run-4 signature.
+        ep_id = recorder.record_episode(
+            session_id="s",
+            content=content,
+            episode_type="decision",
+            group_id="system",
+        )
+        assert ep_id is not None

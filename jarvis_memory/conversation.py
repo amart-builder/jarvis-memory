@@ -339,6 +339,7 @@ class EpisodeRecorder:
         episode_type: Optional[str] = None,
         group_id: Optional[str] = None,
         importance: float = 0.8,
+        ctx=None,  # Run 4: OperationContext | None — see EOF trust-boundary block.
     ) -> Optional[str]:
         """Record a conversation episode.
 
@@ -348,10 +349,22 @@ class EpisodeRecorder:
             episode_type: Memory type. Auto-classified if not provided.
             group_id: Project group. Inherited from session if not provided.
             importance: Importance score (0-1).
+            ctx: Optional OperationContext (Run 4 trust boundary). When the
+                caller provides a ``ctx`` with ``remote=True`` and the
+                content trips an abuse heuristic, a WARNING is logged.
+                LOGGED-ONLY — never refuses. ``None`` (default) skips the
+                check for backward compatibility.
 
         Returns:
             Episode UUID if saved, None if filtered or failed.
         """
+        # Run 4: trust-boundary audit — log-only, never refuses. Implementation
+        # lives at EOF in the `# === TRUST BOUNDARY — RUN 4 ===` block.
+        try:
+            self._audit_remote_write(ctx, content, group_id, episode_type)
+        except Exception as _aud_err:  # noqa: BLE001 — advisory only
+            logger.debug(f"trust-boundary audit failed (non-blocking): {_aud_err}")
+
         if not self.should_record(content):
             logger.debug(f"Episode filtered (not significant enough): {content[:50]}")
             return None
@@ -766,3 +779,149 @@ class SnapshotManager:
 
         lines.append("")
         return "\n".join(lines)
+
+
+# === TRUST BOUNDARY — RUN 4 ===
+#
+# Write-side audit for remote-originated episode writes. Logged-only.
+# ``EpisodeRecorder._audit_remote_write`` is mounted onto the class at the
+# end of this block so the main class body above stays visually clean
+# and Run 2's edits land further up without colliding with this block.
+#
+# Heuristic triggers (any one is enough to emit a warning):
+#   1. group_id uses a non-canonical shape (uppercase, spaces, > 64 chars,
+#      starts with punctuation).
+#   2. content looks like a shell payload (leading ``#!`` shebang, contains
+#      ``rm -rf``, ``:(){`` fork-bomb signature, ``wget|curl http``, etc.).
+#   3. content is suspiciously large (>10 kB) — possible exfiltration.
+#
+# The warning is structured so ops can grep it later:
+#   logger.warning("possible_abusive_remote_write %s", {...fields...})
+
+import re as _re_run4  # noqa: E402 — trust-boundary block imports at EOF
+
+
+_GROUP_ID_CANONICAL = _re_run4.compile(r"^[a-z0-9][a-z0-9_\-]{0,63}$")
+
+_SHELL_PAYLOAD_PATTERNS = [
+    _re_run4.compile(r"^#!"),
+    _re_run4.compile(r"\brm\s+-rf\s"),
+    _re_run4.compile(r":\(\)\s*\{.*:\|:&"),                 # fork bomb
+    _re_run4.compile(r"\b(wget|curl)\s+https?://[^\s|]+"),
+    _re_run4.compile(r"\$\(.*\)\s*\|?\s*sh\b"),             # $(...) | sh
+    _re_run4.compile(r"\beval\s*\("),
+    _re_run4.compile(r"\bsudo\s"),
+]
+
+_LARGE_CONTENT_BYTES = 10 * 1024
+
+
+def _looks_like_abusive_content(content: str) -> Optional[str]:
+    """Return the reason string if content matches an abuse pattern, else None."""
+    if not isinstance(content, str):
+        return None
+    if len(content.encode("utf-8")) > _LARGE_CONTENT_BYTES:
+        return "content_over_10kb"
+    for pat in _SHELL_PAYLOAD_PATTERNS:
+        if pat.search(content):
+            return f"shell_payload_pattern:{pat.pattern}"
+    return None
+
+
+def _looks_like_nonstandard_group_id(group_id: Optional[str]) -> Optional[str]:
+    """Return a reason string if group_id looks off, else None."""
+    if group_id is None:
+        return None
+    if not isinstance(group_id, str) or not group_id.strip():
+        return "empty_or_non_string"
+    if not _GROUP_ID_CANONICAL.fullmatch(group_id):
+        return "non_canonical_shape"
+    return None
+
+
+def _resolve_ambient_ctx(explicit_ctx):
+    """If the caller didn't pass ``ctx``, try to inherit from the ambient surface.
+
+    MCP server and REST API install contextvars at the start of each request
+    (Run 4 trust-boundary blocks). If one is set, we use it. Otherwise ``None``
+    (treat as trusted-local).
+    """
+    if explicit_ctx is not None:
+        return explicit_ctx
+    # MCP first (more likely to be abusive), then REST.
+    try:
+        from mcp_server.server import current_mcp_context  # noqa: WPS433 — intentional circ-ok import
+
+        mcp_ctx = current_mcp_context()
+        if mcp_ctx is not None:
+            return mcp_ctx
+    except Exception:  # noqa: BLE001 — defensive
+        pass
+    try:
+        from jarvis_memory.api import current_rest_context  # noqa: WPS433
+
+        rest_ctx = current_rest_context()
+        if rest_ctx is not None:
+            return rest_ctx
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _audit_remote_write(
+    self: "EpisodeRecorder",
+    ctx,
+    content: str,
+    group_id: Optional[str],
+    episode_type: Optional[str],
+) -> None:
+    """Emit a structured WARNING if ``ctx.remote`` and content/group_id trip a heuristic.
+
+    Never raises — callers wrap in try/except anyway. Never refuses the write.
+    """
+    ctx = _resolve_ambient_ctx(ctx)
+    if ctx is None:
+        return
+    # Only care about remote ctx.
+    if not getattr(ctx, "remote", False):
+        return
+
+    reasons: list[str] = []
+    content_reason = _looks_like_abusive_content(content)
+    if content_reason:
+        reasons.append(content_reason)
+    group_reason = _looks_like_nonstandard_group_id(group_id)
+    if group_reason:
+        reasons.append(f"group_id:{group_reason}")
+
+    if not reasons:
+        return
+
+    logger.warning(
+        "possible_abusive_remote_write %s",
+        {
+            "event": "possible_abusive_remote_write",
+            "caller": getattr(ctx, "caller", None),
+            "source": getattr(ctx, "source", None),
+            "reasons": reasons,
+            "episode_type": episode_type,
+            "group_id": group_id,
+            "content_preview": (content or "")[:80],
+            "content_bytes": len(content.encode("utf-8")) if isinstance(content, str) else 0,
+        },
+    )
+
+
+# Mount as a bound method on ``EpisodeRecorder`` so record_episode can call
+# ``self._audit_remote_write(...)`` above. Keeping the logic at EOF makes
+# the trust-boundary block replaceable / removable as a single unit.
+EpisodeRecorder._audit_remote_write = _audit_remote_write  # type: ignore[attr-defined]
+
+
+__all_run4__ = [
+    "_audit_remote_write",
+    "_looks_like_abusive_content",
+    "_looks_like_nonstandard_group_id",
+]
+
+# === END TRUST BOUNDARY — RUN 4 ===
