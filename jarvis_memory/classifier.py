@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import logging
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from .config import CLASSIFIER_MODEL
 
@@ -261,3 +261,198 @@ def classify_memory(
         "confidence": round(confidence, 2),
         "sentiment": sentiment,
     }
+
+
+# ── Run 1: three-layer routing classifier ────────────────────────────
+#
+# Spec: brain/projects/jarvis-memory/plans/runs/2026-04-20-eval-harness-and-routing/spec.md §5-6.
+# Routing doc: brain/MEMORY_PROTOCOL.md §"Three-layer routing rule".
+#
+# Non-blocking advisory. detect_layer() returns the predicted layer +
+# confidence, and conversation.py turns confidence > 0.7 predictions of
+# non-world-knowledge into a WARNING log line on the write path. Writes
+# still persist; this is a signal, not a gate.
+
+Layer = Literal["world_knowledge", "agent_operations", "session_ephemeral"]
+
+# episode_type hints. These are high-confidence signals (explicit caller
+# intent) that short-circuit the keyword scan.
+_WORLD_KNOWLEDGE_TYPES: set[str] = {
+    "decision", "fact", "plan", "completion", "outcome", "milestone",
+    "correction", "event", "meeting", "handoff", "commitment", "insight",
+    "relationship", "observation", "action", "intention", "procedure",
+    "answer", "goal", "constraint", "cancellation", "hypothesis",
+    "question", "meta",
+}
+_AGENT_OPS_TYPES: set[str] = {"preference", "config", "guideline"}
+_SESSION_TYPES: set[str] = {"ephemeral", "session", "transcript"}
+
+# Regex and phrase heuristics — keyword scans on lowercased content.
+# Patterns per layer, each scored at 1.0 per match (confidence floors at 0.3).
+
+_AGENT_OPS_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\buser (prefers?|likes?|wants?|hates?|dislikes?)\b"),
+    re.compile(r"\balex (prefers?|wants?|likes?|hates?|dislikes?)\b"),
+    re.compile(r"\b(always|never) (do|use|respond|reply|format|include|add|mention)\b"),
+    re.compile(r"\bdefault(s|\s+to)\b"),
+    re.compile(r"\b(tool|response|output|formatting) (rule|config|settings?)\b"),
+    re.compile(r"\bin (this|every) (session|conversation), (always|never|do not|don't)\b"),
+    re.compile(r"\bclaude (should|must|needs to|always|never)\b"),
+    re.compile(r"\bset up [\w\- ]{1,40} for (claude|cursor|codex|openclaw)\b"),
+    re.compile(r"\b(preferences?|configuration|guideline)s? (for|about|on)\b"),
+    re.compile(r"\b(system prompt|system instruction|instruction tuning)\b"),
+    re.compile(r"\bauto[- ]?memory\b"),
+    re.compile(r"\.claude/settings\.json"),
+]
+
+_SESSION_EPHEMERAL_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\b(this|current) (conversation|chat|session)\b"),
+    re.compile(r"\bjust now\b"),
+    re.compile(r"\b(what|as) i (just )?said\b"),
+    re.compile(r"\b(as|like) (we|i) (just )?(said|mentioned|discussed)\b"),
+    re.compile(r"\b(earlier|a moment ago|above) (in this|in the) (chat|conversation|thread)\b"),
+    re.compile(r"\[temp\]"),
+    re.compile(r"\[ephemeral\]"),
+    re.compile(r"\bin this thread\b"),
+]
+
+# World-knowledge positive markers. Matched for completeness (raise
+# confidence of a world_knowledge prediction) but never required — the
+# default bucket is world_knowledge regardless.
+_WORLD_KNOWLEDGE_PATTERNS: list[re.Pattern] = [
+    re.compile(r"\[(decision|fact|plan|correction|meeting|completion|handoff|milestone)\]", re.IGNORECASE),
+    re.compile(r"\bdecided to\b"),
+    re.compile(r"\bchose\b"),
+    re.compile(r"\bshipped\b"),
+    re.compile(r"\bdeployed\b"),
+    re.compile(r"\bmerged\b"),
+    re.compile(r"\blaunched\b"),
+    re.compile(r"\b(?:\$|€|£)\d+[\d,.]*\b"),  # money amounts
+    re.compile(r"\b20\d{2}-\d{2}-\d{2}\b"),   # ISO dates
+]
+
+# Pronoun-heaviness signal for session_ephemeral. If the text is pronoun-
+# dense without a proper noun / concrete entity, that's a tell.
+_PRONOUNS: set[str] = {
+    "i", "me", "my", "mine",
+    "we", "us", "our", "ours",
+    "you", "your", "yours",
+    "it", "this", "that", "these", "those",
+    "he", "she", "his", "her", "them", "their",
+}
+_PROPER_NOUN = re.compile(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]+)*\b")
+
+
+def _count_matches(patterns: list[re.Pattern], text: str) -> int:
+    """Sum matches across a list of patterns on the given text."""
+    total = 0
+    for pat in patterns:
+        total += len(pat.findall(text))
+    return total
+
+
+def _confidence_from_counts(hits: int) -> float:
+    """Map raw hit count → confidence in [0.0, 1.0].
+
+    0 hits → 0.0. 1 → ~0.55. 2 → ~0.75. 3+ → 0.85+. Caps at 0.95 so
+    callers never see a perfectly-certain classifier.
+    """
+    if hits <= 0:
+        return 0.0
+    # 1 - 0.45 * 0.55^hits → smooth saturating curve.
+    return min(0.95, 1.0 - 0.45 * (0.55 ** hits))
+
+
+def detect_layer(content: str, episode_type: Optional[str] = None) -> tuple[Layer, float]:
+    """Classify a prospective write into one of three routing layers.
+
+    Layers
+    ------
+    world_knowledge
+        Facts, decisions, plans, events, and other durable observations
+        about the world (people, companies, deals, code, infra). The
+        default bucket — jarvis-memory's raison d'être.
+
+    agent_operations
+        Agent-side configuration: user preferences, response-formatting
+        rules, always/never directives, tool config. Belongs in Claude's
+        ``.auto-memory/`` or an OpenClaw equivalent, NOT in jarvis.
+
+    session_ephemeral
+        References to the current conversation ("this chat", "just now",
+        pronoun-heavy with no concrete entity, or an explicit ``[TEMP]``
+        tag). Should stay in the session window and not be persisted.
+
+    Args:
+        content: The candidate episode body.
+        episode_type: Optional explicit type from the caller. Accepts
+            ``None``; the classifier handles it the same way as an unknown
+            type (keyword heuristics only).
+
+    Returns:
+        Tuple of ``(layer, confidence)``. Confidence is in [0.0, 0.95];
+        0.0 always means ``world_knowledge`` (default bucket). Confidence
+        > 0.7 for a non-default layer is the threshold the recorder uses
+        to emit a WARNING.
+    """
+    # Null-safe content: detect_layer MUST NOT raise on empty input — the
+    # write-path hook calls us before persisting and any exception would
+    # break save_episode.
+    if content is None:
+        content = ""
+    text = content if isinstance(content, str) else str(content)
+    text_lower = text.lower()
+
+    # Normalize episode_type.
+    et = (episode_type or "").strip().lower() or None
+
+    # ── 1. Explicit episode_type hint is the strongest signal ────────
+    if et in _AGENT_OPS_TYPES:
+        # Still scan content for agreement; a known ops type earns a
+        # high base confidence that keyword hits add to.
+        hits = _count_matches(_AGENT_OPS_PATTERNS, text_lower)
+        return "agent_operations", max(0.85, _confidence_from_counts(hits + 1))
+    if et in _SESSION_TYPES:
+        hits = _count_matches(_SESSION_EPHEMERAL_PATTERNS, text_lower)
+        return "session_ephemeral", max(0.85, _confidence_from_counts(hits + 1))
+    if et in _WORLD_KNOWLEDGE_TYPES:
+        wk_hits = _count_matches(_WORLD_KNOWLEDGE_PATTERNS, text_lower)
+        return "world_knowledge", _confidence_from_counts(wk_hits + 1)
+
+    # ── 2. Keyword scan per layer ────────────────────────────────────
+    ops_hits = _count_matches(_AGENT_OPS_PATTERNS, text_lower)
+    session_hits = _count_matches(_SESSION_EPHEMERAL_PATTERNS, text_lower)
+    wk_hits = _count_matches(_WORLD_KNOWLEDGE_PATTERNS, text_lower)
+
+    ops_conf = _confidence_from_counts(ops_hits)
+    session_conf = _confidence_from_counts(session_hits)
+    wk_conf = _confidence_from_counts(wk_hits)
+
+    # ── 3. Pronoun-heavy boost for session_ephemeral ─────────────────
+    # If the content is short, pronoun-dense, and lacks a proper noun,
+    # it's more likely session_ephemeral.
+    tokens = [t for t in re.findall(r"[a-zA-Z']+", text_lower) if t]
+    if 3 <= len(tokens) <= 40:
+        pronoun_count = sum(1 for t in tokens if t in _PRONOUNS)
+        pronoun_ratio = pronoun_count / len(tokens) if tokens else 0.0
+        has_proper_noun = bool(_PROPER_NOUN.search(text))
+        if pronoun_ratio >= 0.25 and not has_proper_noun:
+            session_conf = max(session_conf, 0.75)
+
+    # ── 4. Pick winner ────────────────────────────────────────────────
+    # Non-default layers must beat the default by a clear margin; this is
+    # what keeps false positives low. If agent_ops and session both fire,
+    # pick the higher-confidence one.
+    best_layer: Layer = "world_knowledge"
+    best_conf = max(wk_conf, 0.0)
+    if ops_conf >= session_conf and ops_conf >= 0.5:
+        best_layer = "agent_operations"
+        best_conf = ops_conf
+    elif session_conf > ops_conf and session_conf >= 0.5:
+        best_layer = "session_ephemeral"
+        best_conf = session_conf
+
+    # Short, ambiguous content → fall back to world_knowledge / low conf.
+    if best_layer == "world_knowledge":
+        return "world_knowledge", round(wk_conf, 2)
+    return best_layer, round(best_conf, 2)
