@@ -20,7 +20,9 @@ from .config import (
     DEVICE_ID, SESSION_CHAIN_DEPTH, EPISODE_MIN_LENGTH,
     MAX_EPISODES_PER_SESSION, SNAPSHOT_MAX_SIZE,
 )
-from .classifier import classify_memory, detect_layer
+from .classifier import classify_memory, detect_layer, extract_entity_references
+from .graph import extract_typed_edges, create_edges_in_tx
+from .pages import put_page, append_timeline_entry, PAGE_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -427,12 +429,96 @@ class EpisodeRecorder:
                     episode_id=episode_id,
                 )
 
+                # Run 2: Page + typed-edge maintenance.
+                # Same session scope as the episode write — if any step
+                # raises, the whole session's work (including the episode
+                # create above) is discarded. In practice each `db.run`
+                # is already auto-committed individually because we're
+                # not inside an explicit `begin_transaction` block;
+                # still, any exception aborts the flow and we log it.
+                try:
+                    self._maintain_pages_for_episode(
+                        session=db,
+                        episode_id=episode_id,
+                        content=content,
+                        episode_type=episode_type,
+                        group_id=group_id,
+                        created_at=now.isoformat(),
+                    )
+                except Exception as page_err:  # noqa: BLE001 — page maint failures must not lose episodes
+                    logger.warning(
+                        f"Page maintenance failed for {episode_id} (episode persisted): {page_err}"
+                    )
+
             logger.info(f"Episode recorded: [{episode_type}] {content[:60]}...")
             return episode_id
 
         except Exception as e:
             logger.error(f"Failed to record episode: {e}")
             return None
+
+    def _maintain_pages_for_episode(
+        self,
+        session,
+        episode_id: str,
+        content: str,
+        episode_type: Optional[str],
+        group_id: Optional[str],
+        created_at: str,
+        page_label: str = PAGE_LABEL,
+    ) -> None:
+        """Run 2: Page + typed-edge maintenance inside an episode write.
+
+        Called by ``record_episode`` after the Episode node is created.
+        Mirrors the spec §2 contract:
+
+        1. ``extract_entity_references(content)`` → EntityRef list.
+        2. For each ref, upsert a ``:Page {slug, domain}`` (ambient create).
+        3. ``extract_typed_edges(content, episode_type)`` → TypedEdge list.
+        4. MERGE each edge (endpoints get ambient Pages if still missing).
+        5. ``append_timeline_entry`` on each referenced page, pointing at
+           this episode.
+
+        Runs on the *same* Neo4j session as the episode write so the work
+        is coherent with the surrounding context. Exceptions propagate
+        upward; caller (``record_episode``) logs + continues (episodes
+        are authoritative; Page maintenance is augmentation).
+        """
+        # 1. Entity refs — what does this episode talk about?
+        refs = extract_entity_references(content, episode_type)
+
+        # 2. Ambient Page creation for every referenced entity.
+        for ref in refs:
+            put_page(ref.slug, ref.domain, tx=session, label=page_label)
+
+        # 3. Typed-edge extraction (pure function).
+        edges = extract_typed_edges(
+            content,
+            episode_type=episode_type,
+            group_id=group_id,
+        )
+
+        # 4. Materialize edges (creates endpoint Pages if missing).
+        if edges:
+            create_edges_in_tx(session, edges, from_label=page_label, to_label=page_label)
+
+        # 5. Timeline: EVIDENCED_BY each referenced page → this episode.
+        #    The union of ref slugs + edge-endpoint slugs is the set of
+        #    pages whose timeline should grow by this episode.
+        timeline_slugs: set[str] = {ref.slug for ref in refs}
+        for e in edges:
+            timeline_slugs.add(e.from_slug)
+            timeline_slugs.add(e.to_slug)
+        summary = content[:120] if content else ""
+        for slug in timeline_slugs:
+            append_timeline_entry(
+                slug,
+                episode_id,
+                at=created_at,
+                summary=summary,
+                tx=session,
+                label=page_label,
+            )
 
     def get_session_episodes(
         self,

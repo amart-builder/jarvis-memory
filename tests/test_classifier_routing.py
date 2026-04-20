@@ -212,3 +212,68 @@ class TestEdgeCases:
         assert layer == "world_knowledge"
         layer2, _ = detect_layer(12345)  # type: ignore[arg-type]
         assert layer2 == "world_knowledge"
+
+
+# ── Run 2: entity-reference extraction ───────────────────────────────
+
+
+class TestExtractEntityReferences:
+    """classifier.extract_entity_references (Run 2) helper.
+
+    Feeds ``record_episode`` so every proper-noun mention gets an
+    ambient Page. Must be deterministic + gated by detect_layer so
+    session-ephemeral fragments and agent-ops preferences DO NOT seed
+    Pages.
+    """
+
+    def test_extracts_proper_nouns(self):
+        from jarvis_memory.classifier import extract_entity_references
+
+        refs = extract_entity_references(
+            "Alice Cooper and Bob Jones are building Foundry Inc together.",
+            episode_type="fact",
+        )
+        slugs = {r.slug for r in refs}
+        assert "alice-cooper" in slugs
+        assert "bob-jones" in slugs
+        assert "foundry-inc" in slugs
+
+    def test_stable_order_by_slug(self):
+        from jarvis_memory.classifier import extract_entity_references
+
+        refs = extract_entity_references(
+            "Zebra Labs and Alpha Corp both shipped.",
+            episode_type="fact",
+        )
+        slugs = [r.slug for r in refs]
+        assert slugs == sorted(slugs)
+
+    def test_session_ephemeral_content_suppressed(self):
+        """Highly-ephemeral chat fragments should NOT seed pages."""
+        from jarvis_memory.classifier import extract_entity_references
+
+        # Pronoun-heavy, short, no proper noun — detect_layer → session_ephemeral
+        refs = extract_entity_references(
+            "just now we decided to push it to next week",
+            episode_type="ephemeral",
+        )
+        assert refs == []
+
+    def test_empty_content_returns_empty(self):
+        from jarvis_memory.classifier import extract_entity_references
+
+        assert extract_entity_references("") == []
+        assert extract_entity_references(None) == []  # type: ignore[arg-type]
+
+    def test_domain_inference_from_context(self):
+        from jarvis_memory.classifier import extract_entity_references
+
+        refs = extract_entity_references(
+            "Foundry Inc is a company building Navi Systems as a project.",
+            episode_type="fact",
+        )
+        by_slug = {r.slug: r.domain for r in refs}
+        # "company" context → company
+        assert by_slug.get("foundry-inc") in {"company", "topic", "project"}
+        # "project" context → project
+        assert by_slug.get("navi-systems") in {"company", "project", "topic"}
