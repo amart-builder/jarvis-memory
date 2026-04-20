@@ -1163,3 +1163,74 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# === TRUST BOUNDARY — RUN 4 ===
+#
+# Every MCP tool invocation sets a ``contextvars.ContextVar`` to an
+# ``OperationContext(remote=True, source="mcp", caller=...)`` marker.
+# Downstream code that accepts an optional ``ctx`` kwarg (e.g.
+# ``EpisodeRecorder.record_episode``) can read this to apply the
+# trust-boundary audit defined in ``jarvis_memory.conversation``'s own
+# trust-boundary block.
+#
+# This block is placed at EOF so Run 2's tool-list additions land earlier
+# in the file without conflicting with our additions.
+#
+# Logged-only in this run — no refusals, no new error paths.
+
+import contextvars as _ctxvars_run4  # noqa: E402 — deferred import at EOF
+import functools as _functools_run4  # noqa: E402
+
+from jarvis_memory.operation_context import OperationContext as _OperationContext_run4  # noqa: E402
+
+# ContextVar holding the current MCP request's OperationContext.
+_MCP_CTX: _ctxvars_run4.ContextVar[_OperationContext_run4 | None] = _ctxvars_run4.ContextVar(
+    "jarvis_memory_mcp_ctx", default=None,
+)
+
+
+def current_mcp_context() -> _OperationContext_run4 | None:
+    """Read the current MCP request's OperationContext (None if no MCP call is in flight)."""
+    return _MCP_CTX.get()
+
+
+def _extract_caller(arguments: dict[str, Any]) -> str:
+    """Best-effort caller-identity extraction from MCP tool arguments.
+
+    Agents typically don't identify themselves explicitly — fall back to
+    a generic "mcp-agent" label. Real identification is a future concern.
+    """
+    return str(arguments.get("_mcp_caller") or arguments.get("caller") or "mcp-agent")
+
+
+_ORIGINAL_DISPATCH_RUN4 = _dispatch
+
+
+async def _dispatch_with_ctx(name, arguments, *args, **kwargs):  # type: ignore[no-redef]
+    """Wrap ``_dispatch`` so every MCP tool call runs under an MCP OperationContext.
+
+    Tools that inject ``ctx`` into internal calls (like ``save_episode`` →
+    ``record_episode``) can read the context via ``current_mcp_context()``.
+    Tools that don't care are unaffected.
+    """
+    ctx = _OperationContext_run4.for_mcp(_extract_caller(arguments or {}))
+    token = _MCP_CTX.set(ctx)
+    try:
+        return await _ORIGINAL_DISPATCH_RUN4(name, arguments, *args, **kwargs)
+    finally:
+        _MCP_CTX.reset(token)
+
+
+# Monkey-patch: redirect the module-global name ``_dispatch`` to the wrapped
+# version. ``create_server`` above references ``_dispatch`` via a closure in
+# ``call_tool``, so this replacement is picked up for every new server.
+_dispatch = _dispatch_with_ctx  # type: ignore[assignment]
+
+
+__all_run4__ = [
+    "current_mcp_context",
+    "_MCP_CTX",
+]
+
+# === END TRUST BOUNDARY — RUN 4 ===

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.atlas.minion-worker</string>
+
+    <!-- Long-lived daemon. Launchd keeps it alive if it crashes. -->
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Paths assume the Mac Mini install at ~/Atlas. Adjust for the MBP if needed. -->
+        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python</string>
+        <string>-m</string>
+        <string>jarvis_memory.minions</string>
+        <string>worker</string>
+        <string>--queue</string>
+        <string>default</string>
+        <string>--concurrency</string>
+        <string>1</string>
+    </array>
+
+    <!-- Auto-start on login / machine boot. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash, not on network state or config changes. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+        <key>NetworkState</key>
+        <false/>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Don't let launchd thrash-restart on init-time failures. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Working directory: project root (same as compaction plists). -->
+    <key>WorkingDirectory</key>
+    <string>/Users/alexanderjmartin/Atlas/jarvis-memory</string>
+
+    <!-- stdout/stderr captured to ~/Atlas/logs/ so Atlas can tail + rotate. -->
+    <key>StandardOutPath</key>
+    <string>/Users/alexanderjmartin/Atlas/logs/minion-worker.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/alexanderjmartin/Atlas/logs/minion-worker.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Minimal PATH for subprocesses spawned by handlers. -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- SQLite queue file path. Override via env when running multiple workers. -->
+        <key>MINIONS_DB_PATH</key>
+        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/data/minions.sqlite</string>
+        <!-- Shell handler is DEFAULT DISABLED. Set GBRAIN_ALLOW_SHELL_JOBS=1 here
+             ONLY after a deliberate review of which handlers are registered. -->
+        <key>GBRAIN_ALLOW_SHELL_JOBS</key>
+        <string>0</string>
+    </dict>
+
+    <!-- Soft exit on SIGTERM lets the worker finish the in-flight job. -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <!-- Nice: compaction jobs are bursty; keep the worker out of the interactive
+         user's way. -->
+    <key>Nice</key>
+    <integer>5</integer>
+
+    <!-- ProcessType: background / non-interactive. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

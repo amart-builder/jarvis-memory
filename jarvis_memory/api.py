@@ -842,3 +842,62 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# === TRUST BOUNDARY — RUN 4 ===
+#
+# FastAPI middleware that wraps every request in an ``OperationContext``
+# marker ``(remote=True, source="rest", caller=<client_ip>)``. Downstream
+# functions that accept an optional ``ctx`` kwarg read this via a
+# contextvars-backed getter so the audit heuristic in
+# ``jarvis_memory.conversation``'s own trust-boundary block can fire.
+#
+# Logged-only — no refusals. No new error paths.
+
+import contextvars as _ctxvars_run4  # noqa: E402 — deferred import at EOF
+
+from starlette.middleware.base import BaseHTTPMiddleware as _BaseHTTPMiddleware_run4  # noqa: E402
+from starlette.requests import Request as _Request_run4  # noqa: E402
+
+from jarvis_memory.operation_context import OperationContext as _OperationContext_run4  # noqa: E402
+
+
+_REST_CTX: _ctxvars_run4.ContextVar[_OperationContext_run4 | None] = _ctxvars_run4.ContextVar(
+    "jarvis_memory_rest_ctx", default=None,
+)
+
+
+def current_rest_context() -> _OperationContext_run4 | None:
+    """Read the current REST request's OperationContext (None outside a request)."""
+    return _REST_CTX.get()
+
+
+class _RestTrustBoundaryMiddleware(_BaseHTTPMiddleware_run4):
+    """Sets the REST OperationContext contextvar for the duration of each request."""
+
+    async def dispatch(self, request: _Request_run4, call_next):
+        client = getattr(request, "client", None)
+        caller = (client.host if client and client.host else None) or "rest-unknown"
+        ctx = _OperationContext_run4.for_rest(caller)
+        token = _REST_CTX.set(ctx)
+        try:
+            return await call_next(request)
+        finally:
+            _REST_CTX.reset(token)
+
+
+# Install the middleware on the existing ``app``. Starlette preserves insertion
+# order; adding at EOF means Run 4's middleware runs OUTERMOST, so contextvars
+# are set before any other middleware (and any endpoint handler) runs.
+try:
+    app.add_middleware(_RestTrustBoundaryMiddleware)
+except Exception as _mw_exc:  # noqa: BLE001 — defensive (shouldn't happen)
+    logger.warning("Run 4: failed to install trust-boundary middleware: %s", _mw_exc)
+
+
+__all_run4__ = [
+    "current_rest_context",
+    "_REST_CTX",
+]
+
+# === END TRUST BOUNDARY — RUN 4 ===
