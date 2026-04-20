@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -426,3 +427,200 @@ class CompactionEngine:
         except Exception as e:
             logger.error(f"Failed to get compaction status: {e}")
             return {"error": str(e)}
+
+    # ── Run 3: dream-cycle hygiene phases ──────────────────────────────
+    #
+    # These run *read-only*. They surface fix queues and drift metrics
+    # so later review (human or agent) can act. Auto-fixing production
+    # data is deferred (spec Run 3 Decision Log, 2026-04-20).
+    _CITATION_PATTERNS = [
+        # "[cite:uuid]" or "[cite:slug]" — must have a value.
+        re.compile(r"\[cite:\s*\]"),
+        # Dangling bracket: "[cite: something\n" with no close bracket.
+        re.compile(r"\[cite:[^\]\n]{0,120}$", re.MULTILINE),
+        # "see episode UUID" where UUID is obviously malformed (less than
+        # 6 chars after the prefix — UUID-shaped ids are far longer).
+        re.compile(r"see episode\s+[^\s]{1,5}(?:\W|$)", re.IGNORECASE),
+    ]
+
+    def _fix_citations(self, session=None, *, sample_limit: int = 500) -> dict[str, Any]:
+        """Scan episode content for broken citation patterns.
+
+        Dream-cycle phase 1 of 3. Returns a fix queue (does NOT mutate
+        episode content). Runtime budget: ≤ 2 min on current corpus size
+        (spec Run 3 §"Constraints"); scanning is bounded by ``sample_limit``.
+
+        Args:
+            session: Optional existing Neo4j session. When None, we open
+                one from ``self._driver``.
+            sample_limit: Maximum episodes to scan in a single pass.
+
+        Returns:
+            ``{"scanned": int, "broken_count": int, "queue": list, "error": str?}``.
+            Each queue entry: ``{uuid, issues, content_preview}``.
+        """
+        import time
+
+        started = time.monotonic()
+        try:
+            if self._driver is None:
+                return {"scanned": 0, "broken_count": 0, "queue": [], "error": "no driver"}
+
+            owns = session is None
+            sess = session or self._driver.session()
+            try:
+                result = sess.run(
+                    """
+                    MATCH (n:Episode)
+                    WHERE n.content IS NOT NULL
+                      AND coalesce(n.lifecycle_status, 'active') IN ['active', 'confirmed']
+                    RETURN n.uuid AS uuid, n.content AS content
+                    ORDER BY n.created_at DESC
+                    LIMIT $lim
+                    """,
+                    lim=sample_limit,
+                )
+                rows = [dict(r) for r in result]
+            finally:
+                if owns and hasattr(sess, "close"):
+                    sess.close()
+
+            queue: list[dict[str, Any]] = []
+            for row in rows:
+                content = row.get("content") or ""
+                issues: list[str] = []
+                for pattern in self._CITATION_PATTERNS:
+                    if pattern.search(content):
+                        issues.append(pattern.pattern)
+                if issues:
+                    queue.append(
+                        {
+                            "uuid": row.get("uuid"),
+                            "issues": issues,
+                            "content_preview": content[:160],
+                        }
+                    )
+
+            runtime_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "dream-cycle fix_citations: scanned=%d broken=%d runtime_ms=%d",
+                len(rows),
+                len(queue),
+                runtime_ms,
+            )
+            return {
+                "scanned": len(rows),
+                "broken_count": len(queue),
+                "queue": queue,
+                "runtime_ms": runtime_ms,
+            }
+        except Exception as e:
+            logger.error(f"dream-cycle fix_citations failed: {e}")
+            return {"scanned": 0, "broken_count": 0, "queue": [], "error": str(e)}
+
+    def _report_orphans(self, session=None) -> dict[str, Any]:
+        """Invoke orphans.find_orphans and surface counts for trending.
+
+        Dream-cycle phase 2 of 3. Read-only — we do not auto-delete
+        orphan Pages; we log them so later review can decide.
+        """
+        import time
+
+        started = time.monotonic()
+        try:
+            # Late import to avoid a circular dep at module-load time.
+            from .orphans import find_orphans
+
+            driver = self._driver
+            # find_orphans manages its own session under the hood; if the
+            # caller passed one we reuse it via the ``tx`` parameter.
+            if session is not None:
+                grouped = find_orphans(tx=session)
+            else:
+                grouped = find_orphans(driver=driver)
+
+            counts = {domain: len(pages) for domain, pages in grouped.items()}
+            total = sum(counts.values())
+            runtime_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "dream-cycle report_orphans: total=%d by_domain=%s runtime_ms=%d",
+                total,
+                counts,
+                runtime_ms,
+            )
+            return {
+                "total_orphans": total,
+                "by_domain": counts,
+                "sample": {
+                    domain: [p.slug for p in pages[:5]]
+                    for domain, pages in grouped.items()
+                },
+                "runtime_ms": runtime_ms,
+            }
+        except Exception as e:
+            logger.error(f"dream-cycle report_orphans failed: {e}")
+            return {"total_orphans": 0, "by_domain": {}, "error": str(e)}
+
+    def _reconcile_stale_edges(self, session=None) -> dict[str, Any]:
+        """Find EVIDENCED_BY edges that reference missing Episodes.
+
+        Dream-cycle phase 3 of 3. Read-only — surfaces the ids of any
+        edge pointing at a deleted/missing Episode so later review can
+        archive or clean them. Runtime budget ≤ 2 min.
+        """
+        import time
+
+        started = time.monotonic()
+        try:
+            if self._driver is None:
+                return {"stale_edges": 0, "sample": [], "error": "no driver"}
+
+            owns = session is None
+            sess = session or self._driver.session()
+            try:
+                # EVIDENCED_BY edge with a NULL destination end means
+                # the Episode was deleted but the Page still points at it.
+                # In Neo4j 5 a MATCH can't produce a NULL endpoint, so
+                # we look for edges whose target has a missing uuid.
+                result = sess.run(
+                    """
+                    MATCH (p:Page)-[r:EVIDENCED_BY]->(e)
+                    WHERE e.uuid IS NULL
+                       OR coalesce(e.lifecycle_status, 'active') = 'deleted'
+                    RETURN p.slug AS page_slug, coalesce(e.uuid, '') AS episode_uuid
+                    LIMIT 200
+                    """,
+                )
+                rows = [dict(r) for r in result]
+            finally:
+                if owns and hasattr(sess, "close"):
+                    sess.close()
+
+            runtime_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "dream-cycle reconcile_stale_edges: stale=%d runtime_ms=%d",
+                len(rows),
+                runtime_ms,
+            )
+            return {
+                "stale_edges": len(rows),
+                "sample": rows[:25],
+                "runtime_ms": runtime_ms,
+            }
+        except Exception as e:
+            logger.error(f"dream-cycle reconcile_stale_edges failed: {e}")
+            return {"stale_edges": 0, "sample": [], "error": str(e)}
+
+    def run_dream_cycle(self) -> dict[str, Any]:
+        """Run all three read-only dream-cycle phases in sequence.
+
+        Called from the daily compaction cron (``scripts/run_compaction.py``)
+        right after ``daily_digest``. Total runtime budget ≤ 6 minutes
+        (≤ 2 min per phase) so the combined daily run stays under the
+        extended 25-minute budget in spec Run 3.
+        """
+        report: dict[str, Any] = {}
+        report["fix_citations"] = self._fix_citations()
+        report["orphans"] = self._report_orphans()
+        report["stale_edges"] = self._reconcile_stale_edges()
+        return report
