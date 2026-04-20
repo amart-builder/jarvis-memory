@@ -1,10 +1,15 @@
 """Tests for the composite scoring module."""
 import math
+import os
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
+
+import pytest
 
 from jarvis_memory.scoring import (
     composite_score,
     score_results,
+    scored_search,
     _compute_recency,
     TYPE_BOOST,
     PERSISTENT_TYPES,
@@ -150,3 +155,158 @@ class TestScoreResults:
         results = [{"score": 0.7, "type": "insight", "importance": 0.9}]
         scored = score_results(results)
         assert "composite_score" in scored[0]
+
+
+# ── Run 3: scored_search internals ──────────────────────────────────────
+
+
+class TestScoredSearchInternals:
+    """Rewritten scored_search — external contract locked; internals testable.
+
+    These tests drive ``scored_search`` with pure-Python substitutes for
+    the retriever functions so we never need a real Neo4j/Chroma stack.
+    """
+
+    def _fake_vector(self, id_score_map: dict[str, float]):
+        """Return a ``vector_search_fn`` that emits a ranked list from a map."""
+
+        ranked = sorted(id_score_map.items(), key=lambda kv: -kv[1])
+
+        def _fn(_q: str, n: int):
+            return [
+                {"id": uid, "uuid": uid, "similarity": sim, "metadata": {}}
+                for uid, sim in ranked[:n]
+            ]
+
+        return _fn
+
+    def test_empty_query_returns_empty(self):
+        assert scored_search("") == []
+        assert scored_search("   ") == []
+
+    def test_rrf_is_used_internally(self, monkeypatch):
+        """Monkeypatch the RRF combiner and assert scored_search calls it."""
+        called = {"n": 0}
+
+        import jarvis_memory.scoring as scoring_mod
+        from jarvis_memory.search import rrf as rrf_mod
+
+        original_rrf = rrf_mod.reciprocal_rank_fusion
+
+        def _spy(rankings, k=60):
+            called["n"] += 1
+            return original_rrf(rankings, k=k)
+
+        monkeypatch.setattr(rrf_mod, "reciprocal_rank_fusion", _spy)
+        # Make sure scored_search uses the same name we patched.
+        monkeypatch.setattr(
+            scoring_mod, "_legacy_scored_search",
+            lambda **_kw: [],  # if the search falls back to legacy, RRF wouldn't fire
+        )
+
+        vector = self._fake_vector({"a": 0.9, "b": 0.8})
+        out = scored_search(
+            "what is the architecture of jarvis",
+            limit=5,
+            vector_search_fn=vector,
+            expand_fn=lambda q, n: [q],  # skip expansion fan-out
+        )
+        assert called["n"] >= 1
+        # We asked for limit=5 and had two candidates; both should come back.
+        ids = [r.get("uuid") or r.get("id") for r in out]
+        assert set(ids) == {"a", "b"}
+
+    def test_intent_routing_fires(self, monkeypatch):
+        """Entity intents must trigger expand, temporal intents must not."""
+        import jarvis_memory.scoring as scoring_mod
+
+        expand_log: list[str] = []
+
+        def _spy_expand(q: str, n: int):
+            expand_log.append(q)
+            return [q]
+
+        vector = self._fake_vector({"a": 0.9})
+
+        # Entity intent (proper noun + long enough query).
+        expand_log.clear()
+        scored_search(
+            "tell me about Foundry Ventures overview and strategy",
+            limit=3,
+            vector_search_fn=vector,
+            expand_fn=_spy_expand,
+        )
+        assert expand_log, "entity intent should have called expand_fn"
+
+        # Temporal intent (date phrase).
+        expand_log.clear()
+        scored_search(
+            "show notes from last week",
+            limit=3,
+            vector_search_fn=vector,
+            expand_fn=_spy_expand,
+        )
+        assert not expand_log, (
+            "temporal intent should NOT trigger expand_fn (costs + noise)"
+        )
+
+    def test_group_id_filter_preserved(self):
+        """Hits with a different group_id must be filtered out."""
+        vector = lambda q, n: [
+            {"id": "a", "uuid": "a", "similarity": 0.9, "metadata": {"group_id": "alpha"}},
+            {"id": "b", "uuid": "b", "similarity": 0.8, "metadata": {"group_id": "beta"}},
+            {"id": "c", "uuid": "c", "similarity": 0.7, "metadata": {"group_id": "alpha"}},
+        ]
+        out = scored_search(
+            "something",
+            group_id="alpha",
+            vector_search_fn=vector,
+            expand_fn=lambda q, n: [q],
+        )
+        ids = {r.get("uuid") for r in out}
+        assert ids == {"a", "c"}
+
+    def test_limit_respected(self):
+        vector = lambda q, n: [
+            {"id": f"u{i}", "uuid": f"u{i}", "similarity": 1.0 - i * 0.01, "metadata": {}}
+            for i in range(20)
+        ]
+        out = scored_search(
+            "anything",
+            limit=4,
+            vector_search_fn=vector,
+            expand_fn=lambda q, n: [q],
+        )
+        assert len(out) == 4
+
+    def test_legacy_env_var_routes_to_composite(self, monkeypatch):
+        """JARVIS_SEARCH_LEGACY=1 must route through the Run 1 composite path."""
+        monkeypatch.setenv("JARVIS_SEARCH_LEGACY", "1")
+
+        vector = self._fake_vector({"a": 0.9, "b": 0.5})
+        out = scored_search(
+            "anything at all here",
+            limit=5,
+            vector_search_fn=vector,
+            expand_fn=lambda q, n: [q],
+        )
+        # Legacy path must still produce results with composite_score
+        # attached (that's what the Run 1 baseline exposes).
+        assert out
+        assert all("composite_score" in r for r in out)
+
+    def test_signature_accepts_all_documented_params(self):
+        """Accept every locked kw arg without raising; result may be empty."""
+        # Minimal no-op retrievers so we don't need a real driver.
+        out = scored_search(
+            "q",
+            group_id="g",
+            room="r",
+            hall="h",
+            memory_type="fact",
+            as_of="2025-01-01",
+            limit=3,
+            vector_search_fn=lambda q, n: [],
+            expand_fn=lambda q, n: [q],
+        )
+        assert isinstance(out, list)

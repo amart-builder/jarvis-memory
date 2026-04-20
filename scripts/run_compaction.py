@@ -76,6 +76,20 @@ def main() -> int:
         if args.tier == "daily":
             log.info("Starting daily_digest (group_id=%s)", args.group_id or "<ALL>")
             result = engine.daily_digest(group_id=args.group_id)
+            # Run 3 dream-cycle (read-only hygiene): citation audit,
+            # orphan report, stale-edge reconciliation. Ran after the
+            # daily dedup so a failed dedup still surfaces the cycle
+            # report for review. Each phase has a ≤ 2 min budget.
+            try:
+                log.info("Starting dream-cycle phases")
+                dream_report = engine.run_dream_cycle()
+                log.info("Dream-cycle result: %s", json.dumps(dream_report, default=str))
+                if isinstance(result, dict):
+                    result["dream_cycle"] = dream_report
+            except Exception as dc_err:  # never fail the daily cron on hygiene errors
+                log.warning("dream-cycle failed (non-fatal): %s", dc_err)
+                if isinstance(result, dict):
+                    result["dream_cycle_error"] = str(dc_err)
         else:
             log.info("Starting weekly_merge (group_id=%s)", args.group_id or "<ALL>")
             result = engine.weekly_merge(group_id=args.group_id)
