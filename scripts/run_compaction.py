@@ -39,6 +39,16 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stderr,
 )
+# Downgrade the Neo4j driver's cosmetic notifications. On a fresh DB (no
+# writes yet for :Page, typed edges, compaction_daily_run property, etc.)
+# the server emits WARNING-level "does not exist" hints for every label /
+# type / property we legitimately touch. They're informational — the
+# queries return correct empty results — but they drown the compaction
+# log. Set to DEBUG so `launchd` + developers can still see them with
+# `JARVIS_COMPACT_DEBUG=1` (handled below).
+if os.environ.get("JARVIS_COMPACT_DEBUG") != "1":
+    logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+
 log = logging.getLogger("jarvis-compact")
 
 
