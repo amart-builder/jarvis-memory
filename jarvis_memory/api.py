@@ -15,6 +15,39 @@ Env vars:
     JARVIS_API_PORT    3500
     JARVIS_DEVICE_ID   mac-mini
 """
+
+
+def _load_env_file() -> None:
+    """Load ``.env`` into ``os.environ`` before :mod:`.config` reads it.
+
+    ``jarvis_memory.api`` may be launched via ``launchd`` (with
+    ``--noprofile --norc``) or by a bare ``python -m jarvis_memory.api``
+    command in a shell that never sourced ``.env``. In both cases
+    ``os.getenv()`` would see the code defaults (``NEO4J_PASSWORD="neo4j"``)
+    and silently fail Neo4j auth on any machine with a real password.
+
+    Uses ``setdefault`` so env vars already exported by the parent shell
+    win; this stays compatible with the venv-launcher pattern that does
+    ``source .env``. Parser matches :mod:`scripts.run_compaction`.
+    """
+    import os
+    from pathlib import Path
+
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        val = val.split("#", 1)[0].strip()
+        os.environ.setdefault(key.strip(), val)
+
+
+_load_env_file()
+
+
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
