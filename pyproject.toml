@@ -19,6 +19,14 @@ dependencies = [
     "mcp>=1.0",
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    # Vector search backend (ChromaDB + sentence-transformers). NOT pulled
+    # in transitively by graphiti-core despite its own ChromaDB support —
+    # jarvis_memory/embeddings.py imports both directly. Without these
+    # declared, a cold `pip install -e .` leaves the EmbeddingStore falling
+    # back to text-only search (logs "ChromaDB unavailable, falling back").
+    # Pinned to major version we've tested end-to-end on Alex's Mini.
+    "chromadb>=1.0,<2.0",
+    "sentence-transformers>=3.0,<6.0",
 ]
 
 [project.optional-dependencies]

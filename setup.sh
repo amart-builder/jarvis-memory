@@ -221,12 +221,33 @@ else
     sed -i '' "s|NEO4J_URI=bolt://localhost:7687|NEO4J_URI=$NEO4J_URI|" "$JARVIS_DIR/.env"
     echo -e "  Neo4j URI: ${CYAN}$NEO4J_URI${NC}"
 
-    # Ask for Anthropic API key
-    read -p "  Enter your Anthropic API key (or press Enter to skip): " API_KEY
-    if [ -n "$API_KEY" ]; then
-        sed -i '' "s|ANTHROPIC_API_KEY=sk-ant-...|ANTHROPIC_API_KEY=$API_KEY|" "$JARVIS_DIR/.env"
-        echo -e "  ${GREEN}API key saved${NC}"
-    fi
+    # Ask for Anthropic API key (required — multi-query expansion in
+    # jarvis_memory/search/expansion.py fails open to identity rewrite
+    # without it, which cuts recall 3-8x. Opt out explicitly if you
+    # really want that.)
+    while :; do
+        read -p "  Enter your Anthropic API key (sk-ant-api03-...) or SKIP-NO-RECALL to opt out: " API_KEY
+        if [[ "$API_KEY" == "SKIP-NO-RECALL" ]]; then
+            echo -e "  ${RED}⚠  WARNING: proceeding WITHOUT ANTHROPIC_API_KEY.${NC}"
+            echo -e "  ${RED}   Multi-query expansion (Run 3) will be DISABLED.${NC}"
+            echo -e "  ${RED}   Expected recall drop: 3-8x on the eval harness.${NC}"
+            echo -e "  ${RED}   Add later via: echo 'ANTHROPIC_API_KEY=sk-ant-...' >> $JARVIS_DIR/.env${NC}"
+            break
+        fi
+        # Key must start with the Anthropic v3 prefix AND be plausibly long.
+        # Real keys are ~100 chars; reject anything under 40 as a typo.
+        if [[ "$API_KEY" == sk-ant-api03-* && ${#API_KEY} -ge 40 ]]; then
+            # Escape any '|' in the key so sed doesn't mis-parse (extremely unlikely
+            # since keys are base64url-ish, but defense-in-depth).
+            ESCAPED_KEY="${API_KEY//|/\\|}"
+            sed -i '' "s|ANTHROPIC_API_KEY=sk-ant-...|ANTHROPIC_API_KEY=$ESCAPED_KEY|" "$JARVIS_DIR/.env"
+            echo -e "  ${GREEN}API key saved${NC}"
+            break
+        fi
+        echo -e "  ${RED}✗ API key required. Get one at https://console.anthropic.com/settings/keys${NC}"
+        echo -e "  ${RED}  Must start with 'sk-ant-api03-' and be ≥40 chars.${NC}"
+        echo -e "  ${RED}  Or type SKIP-NO-RECALL to opt out (degraded recall).${NC}"
+    done
 
     # Ask for Neo4j password
     read -p "  Enter your Neo4j password (or press Enter for 'password'): " NEO_PASS
