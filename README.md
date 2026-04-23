@@ -10,7 +10,19 @@ Shared, persistent memory for an agent fleet (OpenClaw on Mac Mini, Claude Code 
 
 Jarvis is a typed-graph store with hybrid RRF search, compiled-truth entity pages, temporal facts, and a dream-cycle compactor — designed to be the canonical shared backend for cross-system continuity.
 
-## Quick start
+## Quick start (for users installing this as a service)
+
+**→ See [CLIENT_INSTALL.md](CLIENT_INSTALL.md) for the full walkthrough.** TL;DR:
+
+```bash
+git clone https://github.com/amart-builder/jarvis-memory.git
+cd jarvis-memory
+bash scripts/client-install.sh
+```
+
+The installer handles venv, `.env`, schema migration, model pre-cache, scheduled compaction, and (optionally) MCP registration with Claude Code + Codex, Claude Code hooks, and the Minions background worker. Re-runnable and idempotent.
+
+## Developer quick start
 
 ```bash
 git clone https://github.com/amart-builder/jarvis-memory.git
@@ -18,7 +30,7 @@ cd jarvis-memory
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"                            # dev deps include pytest
 cp .env.example .env                               # fill in NEO4J_* and ANTHROPIC_API_KEY
-python scripts/migrate_to_v2.py                    # apply Run 2 entity-layer schema
+python scripts/migrate_to_v2.py                    # apply the entity-layer schema
 python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"  # pre-cache embedding model
 bash scripts/verify_install.sh                     # 30-second sanity check
 python -m jarvis_memory.api                        # REST on :3500
@@ -26,7 +38,20 @@ python -m jarvis_memory.api                        # REST on :3500
 
 `scripts/verify_install.sh` is the authoritative "is this install healthy?" check — 7 gates covering imports, entrypoints, Neo4j connectivity, schema state, ChromaDB, core flows, and the MCP tool surface.
 
-**Note on `setup.sh`:** deprecated — hardcodes a two-machine MBP/Mini assumption that no longer applies. Fresh installs use the steps above. `setup.sh` refuses to run without `JARVIS_LEGACY_SETUP=1`.
+**Note on `setup.sh`:** deprecated — hardcodes a two-machine MBP/Mini assumption that no longer applies. Fresh installs use `scripts/client-install.sh` or the developer steps above. `setup.sh` refuses to run without `JARVIS_LEGACY_SETUP=1`.
+
+## Optional integrations
+
+Each is a single command — install whichever ones fit your setup.
+
+| Integration | One-liner | What it does |
+|---|---|---|
+| **Claude Code MCP** | `python scripts/register_mcp.py --client claude-code` | Adds Jarvis as an MCP server in `~/.claude/settings.json` so Claude Code can call all 27 tools directly. |
+| **Codex CLI MCP** | `python scripts/register_mcp.py --client codex` | Same, for Codex: writes a `[mcp_servers.jarvis-memory]` block into `~/.codex/config.toml`. |
+| **Claude Code hooks** | `python install_hooks.py` | SessionStart injects recent project context at session open; PreCompact writes a [HANDOFF] episode before Claude Code auto-compacts. |
+| **Minions background worker** | `scripts/generate_launchagents.sh --with-minion-worker` (Mac) or `scripts/generate_systemd_units.sh --with-minion-worker` (Linux) | Starts a durable SQLite-backed job queue (ported from [garrytan/gbrain](https://github.com/garrytan/gbrain)) for deterministic scheduled work. Most installs don't need this on day one. |
+
+Each comes with a matching `--uninstall` flag for clean removal.
 
 ## Architecture
 
@@ -278,7 +303,8 @@ Test Tailscale: `nc -zv 100.102.6.81 7687`. If down, Mac Mini is offline or Tail
 
 ## Recent changes
 
-- **2026-04-20 — gbrain import (4 runs, 514 tests, +36 from pre-import)**:
+- **Unreleased — client-install path (for v1.0.0)**: `CLIENT_INSTALL.md` walkthrough + `scripts/client-install.sh` one-command installer, portable default paths (`CHROMADB_PATH` → `~/.jarvis-memory/chromadb`, hook logs via `JARVIS_LOG_DIR`), `scripts/generate_launchagents.sh` + `scripts/generate_systemd_units.sh` templated scheduling, `scripts/register_mcp.py` for Claude Code + Codex MCP registration, `scripts/upgrade.sh` for tag-based updates. `install_hooks.py` rewritten to be path-aware.
+- **2026-04-20 — feature port from [garrytan/gbrain](https://github.com/garrytan/gbrain) (4 runs, 514 tests, +36 from pre-port)**:
     - *Run 1* — retrieval eval harness (P@k / R@k / MRR / nDCG), brain/memory/session routing rule, parity-lock tests.
     - *Run 2* — `:Page` entity layer with `compiled_truth`/`timeline`, 8 typed edges, `orphans` + `doctor` commands, MCP surface 23 → 27 tools.
     - *Run 3* — RRF hybrid search in `scored_search` (Chroma + Neo4j fulltext + compiled-truth/backlink boosts), rule-based intent classifier, Haiku-4-5 multi-query expansion with prompt-injection defense, dream-cycle compaction (`fix_citations`, `report_orphans`, `reconcile_stale_edges`). Eval delta: R@5 0.640 → 0.843, MRR 0.756 → 0.899, nDCG@10 0.683 → 0.841.

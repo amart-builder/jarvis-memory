@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Jarvis-Memory weekly compaction on Sunday at 04:00 local time
+Requires=jarvis-compact-weekly.service
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+Unit=jarvis-compact-weekly.service
+
+[Install]
+WantedBy=timers.target

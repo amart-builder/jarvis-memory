@@ -16,7 +16,7 @@ session can pick up where this one left off via continue_session().
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python /Users/alexanderjmartin/Atlas/jarvis-memory/hooks/claude_code_precompact.py",
+            "command": "<JARVIS_MEMORY_ROOT>/.venv/bin/python <JARVIS_MEMORY_ROOT>/hooks/claude_code_precompact.py",
             "timeout": 15
           }
         ]
@@ -43,7 +43,7 @@ session can pick up where this one left off via continue_session().
 - Detects `group_id` from cwd (brain/projects/{name}/ → {name}), CLAUDE.md, or fallback to 'system'
 - Parses the last ~10 user messages from the transcript for a concise summary
 - Writes [HANDOFF] episode via direct Neo4j (reliable from both MBP and Mini)
-- On any failure, writes a fallback JSON line to ~/Atlas/brain/logs/precompact-fallback.log
+- On any failure, writes a fallback JSON line to $JARVIS_LOG_DIR/precompact-fallback.log (default ~/.jarvis-memory/logs/)
 - ALWAYS exits 0 — never blocks compaction
 """
 from __future__ import annotations
@@ -73,8 +73,13 @@ if env_file.exists():
         val = val.split("#", 1)[0].strip()
         os.environ.setdefault(key.strip(), val)
 
-LOG_FILE = Path.home() / "Atlas" / "brain" / "logs" / "precompact-hook.log"
-FALLBACK_LOG = Path.home() / "Atlas" / "brain" / "logs" / "precompact-fallback.log"
+# Log location is parameterized so client installs don't require an
+# Atlas workspace. Default is ~/.jarvis-memory/logs/; override with
+# JARVIS_LOG_DIR.
+LOG_DIR = Path(os.environ.get("JARVIS_LOG_DIR", str(Path.home() / ".jarvis-memory" / "logs")))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "precompact-hook.log"
+FALLBACK_LOG = LOG_DIR / "precompact-fallback.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +91,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# ATLAS_ROOT is only used for group_id auto-detection when the user is
+# working inside Alex's Atlas workspace. Client installs don't have one;
+# the detection logic below gracefully falls through to "system".
 ATLAS_ROOT = Path.home() / "Atlas"
 
 
