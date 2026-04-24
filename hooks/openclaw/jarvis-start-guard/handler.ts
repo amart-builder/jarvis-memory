@@ -130,10 +130,20 @@ async function fetchLatestHandoff(groupId: string) {
 
   try {
     const response = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
-    if (response.status === 404) return null; // no handoff in window
-    if (!response.ok) return null;
+    if (response.status === 404) return null; // no handoff in window — expected
+    if (!response.ok) {
+      // 5xx / 4xx that isn't 404 means the API is reachable but something's wrong.
+      // Silent return-null hides real outages; log so operators see them.
+      console.warn(
+        `[jarvis-start-guard] /api/v2/handoff/latest returned ${response.status} for group_id=${groupId} — treating as no-handoff, but API may be degraded.`
+      );
+      return null;
+    }
     return await response.json();
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[jarvis-start-guard] /api/v2/handoff/latest network error for group_id=${groupId}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return null;
   }
 }

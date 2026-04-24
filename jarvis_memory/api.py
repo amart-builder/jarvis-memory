@@ -884,8 +884,8 @@ async def session_handoff(req: SessionHandoffRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"session_handoff failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("session_handoff failed")
+        raise HTTPException(status_code=500, detail="Internal error writing handoff.")
 
 
 @app.post("/api/v2/session/save_state")
@@ -931,8 +931,8 @@ async def save_state(req: SaveStateRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"save_state failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("save_state failed")
+        raise HTTPException(status_code=500, detail="Internal error saving session state.")
 
 
 @app.get("/api/v2/handoff/latest")
@@ -960,8 +960,8 @@ async def latest_handoff(group_id: str, max_age_hours: int = 72):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"latest_handoff failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("latest_handoff failed")
+        raise HTTPException(status_code=500, detail="Internal error reading handoff.")
 
 
 @app.get("/api/v2/groups")
@@ -978,8 +978,8 @@ async def list_groups():
         groups = handoff_module.list_groups(driver)
         return {"groups": groups, "count": len(groups)}
     except Exception as e:
-        logger.error(f"list_groups failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("list_groups failed")
+        raise HTTPException(status_code=500, detail="Internal error listing groups.")
 
 
 # ── Entry point ─────────────────────────────────────────────────────────

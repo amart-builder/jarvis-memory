@@ -27,11 +27,14 @@ Contract rules enforced here (see HANDOFF_CONTRACT.md for the full list):
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+from .config import SNAPSHOT_MAX_SIZE
 
 
 logger = logging.getLogger("jarvis_memory.handoff")
@@ -100,7 +103,7 @@ def save_handoff(
         ``HandoffResult`` with snapshot_id, episode_id, session_id, group_id,
         idempotent_hit flag.
     """
-    from .conversation import SessionManager, SnapshotManager
+    from .conversation import SessionManager
 
     group_id = _validate_group_id(group_id)
     next_steps = next_steps or []
@@ -138,7 +141,12 @@ def save_handoff(
                     idempotent_hit=True,
                 )
 
-        # Write snapshot.
+        # Build payloads before opening the transaction so a JSON serialization
+        # error can't leave the DB in a half-written state.
+        snapshot_id = str(uuid.uuid4())
+        episode_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
         snapshot_data = {
             "type": "handoff_snapshot",
             "task": task,
@@ -148,16 +156,20 @@ def save_handoff(
             "device": device,
             "session_key": session_key,
             "source": source,
+            "idempotency_key": idempotency_key,
         }
-        snm = SnapshotManager(driver=driver)
-        snapshot_id = snm.save_snapshot(session_id, snapshot_data)
+        snapshot_json = json.dumps(snapshot_data, default=str)
+        if len(snapshot_json) > SNAPSHOT_MAX_SIZE:
+            # Trim lists until the JSON fits. Same approach SnapshotManager uses.
+            for key in ("next_steps",):
+                while (
+                    len(json.dumps(snapshot_data, default=str)) > SNAPSHOT_MAX_SIZE
+                    and isinstance(snapshot_data.get(key), list)
+                    and len(snapshot_data[key]) > 1
+                ):
+                    snapshot_data[key].pop()
+            snapshot_json = json.dumps(snapshot_data, default=str)
 
-        # Write [HANDOFF] Episode. Direct Cypher so we can set
-        # custom fields (idempotency_key, session_key, memory_type) that
-        # EpisodeRecorder doesn't expose. Episode + Snapshot both live in
-        # Neo4j so the graph stays consistent.
-        episode_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
         content_lines = [f"[HANDOFF] {task}"]
         if next_steps:
             content_lines.append("Next steps:")
@@ -166,11 +178,42 @@ def save_handoff(
             content_lines.append(f"Notes: {notes}")
         content = "\n".join(content_lines)
 
-        with driver.session() as db:
-            db.run(
+        # All four writes in one managed transaction — either all land or
+        # Neo4j rolls back. Before this was split across three separate
+        # driver.session() blocks and could half-write on any failure.
+        def _write_atomic(tx):
+            tx.run(
+                """
+                CREATE (snap:Snapshot {
+                    uuid: $snap_id,
+                    session_id: $session_id,
+                    group_id: $group_id,
+                    data: $data,
+                    idempotency_key: $idempotency_key,
+                    created_at: datetime($now)
+                })
+                """,
+                snap_id=snapshot_id,
+                session_id=session_id,
+                group_id=group_id,
+                data=snapshot_json,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            tx.run(
+                """
+                MATCH (s:Session {uuid: $session_id})
+                MATCH (snap:Snapshot {uuid: $snap_id})
+                CREATE (s)-[:HAS_SNAPSHOT {at: datetime($now)}]->(snap)
+                """,
+                session_id=session_id,
+                snap_id=snapshot_id,
+                now=now,
+            )
+            tx.run(
                 """
                 CREATE (e:Episode {
-                    uuid: $uuid,
+                    uuid: $ep_id,
                     group_id: $group_id,
                     content: $content,
                     name: $name,
@@ -178,7 +221,7 @@ def save_handoff(
                     episode_type: 'outcome',
                     importance: 0.9,
                     access_count: 0,
-                    created_at: datetime($created_at),
+                    created_at: datetime($now),
                     session_id: $session_id,
                     device: $device,
                     source: $source,
@@ -186,30 +229,34 @@ def save_handoff(
                     session_key: $session_key
                 })
                 """,
-                uuid=episode_id,
+                ep_id=episode_id,
                 group_id=group_id,
                 content=content,
                 name=f"[HANDOFF] {task[:80]}",
-                created_at=now,
+                now=now,
                 session_id=session_id,
                 device=device,
                 source=source,
                 idempotency_key=idempotency_key,
                 session_key=session_key,
             )
-            # Link Session -> [:PRODUCED_HANDOFF] -> Episode for discoverability.
-            db.run(
+            tx.run(
                 """
                 MATCH (s:Session {uuid: $session_id})
-                MATCH (e:Episode {uuid: $episode_id})
-                CREATE (s)-[:PRODUCED_HANDOFF {at: datetime($at)}]->(e)
+                MATCH (e:Episode {uuid: $ep_id})
+                CREATE (s)-[:PRODUCED_HANDOFF {at: datetime($now)}]->(e)
                 """,
                 session_id=session_id,
-                episode_id=episode_id,
-                at=now,
+                ep_id=episode_id,
+                now=now,
             )
 
-        # Mark session as ended/handoff (non-fatal).
+        with driver.session() as db:
+            db.execute_write(_write_atomic)
+
+        # Mark session as ended/handoff (non-fatal; the handoff itself already
+        # landed — if end_session fails the session just stays 'open', which
+        # a cleanup job or the next handoff will reconcile).
         try:
             sm.end_session(session_id, status="handoff")
         except Exception as e:
@@ -424,7 +471,12 @@ def _find_existing_handoff(
     driver, *, session_id: str, idempotency_key: str, max_age_hours: int = 1,
 ) -> Optional[dict[str, Any]]:
     """Return {episode_id, snapshot_id} if a handoff with this idempotency_key
-    exists for this session within max_age_hours. Else None."""
+    exists for this session within max_age_hours. Else None.
+
+    Matches the Episode AND the Snapshot both by ``idempotency_key`` — the
+    two are written atomically with the same key by ``save_handoff``, so
+    if we see the Episode we always see the paired Snapshot.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
     with driver.session() as db:
         row = db.run(
@@ -432,7 +484,7 @@ def _find_existing_handoff(
             MATCH (e:Episode {session_id: $sid, idempotency_key: $ik})
             WHERE e.memory_type = 'handoff'
               AND e.created_at >= datetime($cutoff)
-            OPTIONAL MATCH (s:Session {uuid: $sid})-[:HAS_SNAPSHOT]->(snap:Snapshot)
+            OPTIONAL MATCH (snap:Snapshot {session_id: $sid, idempotency_key: $ik})
             WHERE snap.created_at >= datetime($cutoff)
             RETURN e.uuid AS episode_id, snap.uuid AS snapshot_id
             ORDER BY e.created_at DESC LIMIT 1
@@ -450,23 +502,28 @@ def _find_existing_snapshot(
     """Return {snapshot_id} if a snapshot with this idempotency_key exists
     for this session within max_age_hours. Else None.
 
-    Snapshots don't have an idempotency_key column directly; we stash it
-    inside the JSON ``data`` field and grep for it here. Not as clean as
-    a real column, but avoids a schema migration for the initial rollout.
+    Queries by the ``idempotency_key`` top-level property (set atomically
+    by save_handoff). Falls back to a JSON substring probe for snapshots
+    written by ``save_state_snapshot`` via the older SnapshotManager path
+    which doesn't expose the column directly — the parameterized probe
+    is safely passed as a Cypher parameter so special characters in keys
+    can't break the query shape.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
     with driver.session() as db:
         row = db.run(
             """
-            MATCH (s:Session {uuid: $sid})-[:HAS_SNAPSHOT]->(snap:Snapshot)
-            WHERE snap.created_at >= datetime($cutoff)
-              AND snap.data CONTAINS $probe
+            MATCH (snap:Snapshot)
+            WHERE snap.session_id = $sid
+              AND snap.created_at >= datetime($cutoff)
+              AND (snap.idempotency_key = $ik OR snap.data CONTAINS $probe)
             RETURN snap.uuid AS snapshot_id
             ORDER BY snap.created_at DESC LIMIT 1
             """,
             sid=session_id,
             cutoff=cutoff,
-            probe=f'"idempotency_key": "{idempotency_key}"',
+            ik=idempotency_key,
+            probe=json.dumps({"idempotency_key": idempotency_key})[1:-1],
         ).single()
         if row is None:
             return None
