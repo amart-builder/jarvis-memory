@@ -38,6 +38,7 @@ dev = [
 
 [project.scripts]
 jarvis-mcp = "mcp_server.server:main_sync"
+jarvis = "jarvis_memory.cli:main"
 
 [tool.ruff]
 line-length = 120

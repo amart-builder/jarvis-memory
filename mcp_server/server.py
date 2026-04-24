@@ -320,14 +320,15 @@ JARVIS_TOOLS = [
     Tool(
         name="save_state",
         description=(
-            "Save a full session state snapshot on demand. Use when the user says 'save state', "
-            "before a known break, or when switching tasks. This is the primary mechanism for "
-            "cross-device handoff — the next session on any device will load this snapshot."
+            "Save a session-state snapshot (non-terminal; does NOT write an Episode). Use for "
+            "mid-session checkpoints. For end-of-session handoff with a retrievable [HANDOFF] "
+            "Episode, use session_handoff instead."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "task": {"type": "string", "description": "What the session was working on"},
+                "task": {"type": "string", "description": "What the session is working on"},
+                "group_id": {"type": "string", "description": "Project scope. Defaults to JARVIS_GROUP_ID env var if unset."},
                 "status": {"type": "string", "description": "Current status: in_progress, completed, blocked", "default": "in_progress"},
                 "completed": {"type": "array", "items": {"type": "string"}, "description": "List of completed items"},
                 "in_progress": {"type": "array", "items": {"type": "string"}, "description": "List of in-progress items"},
@@ -336,9 +337,34 @@ JARVIS_TOOLS = [
                 "blockers": {"type": "array", "items": {"type": "string"}, "description": "Current blockers"},
                 "files_modified": {"type": "array", "items": {"type": "string"}, "description": "Files modified in this session"},
                 "session_id": {"type": "string", "description": "Session UUID (auto-detected if omitted)"},
+                "idempotency_key": {"type": "string", "description": "Optional — duplicate calls within 1h return existing snapshot."},
+                "session_key": {"type": "string", "description": "Optional cross-surface correlation id."},
             },
             "required": ["task"],
         },
+    ),
+    Tool(
+        name="latest_handoff",
+        description=(
+            "Return the most recent [HANDOFF] Episode for a project. Use at session start to "
+            "pick up where the last session left off, before diving into new work."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "group_id": {"type": "string", "description": "Project scope (required)."},
+                "max_age_hours": {"type": "integer", "description": "Reject handoffs older than this (default 72).", "default": 72},
+            },
+            "required": ["group_id"],
+        },
+    ),
+    Tool(
+        name="list_groups",
+        description=(
+            "Return every known group_id with episode + session counts. Use to answer 'where did "
+            "my memory go?' or to debug group_id pollution across projects."
+        ),
+        inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
         name="get_session",
@@ -382,19 +408,22 @@ JARVIS_TOOLS = [
     Tool(
         name="session_handoff",
         description=(
-            "Prepare a handoff package for cross-device continuation. Saves the current snapshot, "
-            "marks the session as ready for pickup, and returns a summary of what the next session "
-            "will receive. Use before switching from MacBook Pro to Mac Mini or vice versa."
+            "Write a session handoff: saves a snapshot AND a retrievable [HANDOFF] Episode. "
+            "Use before context-switching (MacBook ↔ Mini, /compact, end-of-session). The next "
+            "session can find this via latest_handoff or continue_session."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "task": {"type": "string", "description": "What was being worked on"},
+                "group_id": {"type": "string", "description": "Project scope (required). Use 'system' only for true admin/system memory."},
                 "notes": {"type": "string", "description": "Any additional handoff notes for the next session"},
                 "next_steps": {"type": "array", "items": {"type": "string"}, "description": "What the next session should do"},
                 "session_id": {"type": "string", "description": "Session UUID (auto-detected if omitted)"},
+                "idempotency_key": {"type": "string", "description": "Optional key — duplicate writes within 1h return the existing handoff without creating new rows."},
+                "session_key": {"type": "string", "description": "Optional cross-surface correlation id, stored on the Episode."},
             },
-            "required": ["task"],
+            "required": ["task", "group_id"],
         },
     ),
     # ── v2 Tools ──────────────────────────────────────────────────────
@@ -966,29 +995,40 @@ async def _dispatch(
         return {"saved": True, "episode_id": episode_id, "session_id": session_id}
 
     elif name == "save_state":
-        group_id = DEFAULT_GROUP_ID
-        session_id = args.get("session_id") or _get_or_create_session_id(group_id)
+        # Contract: group_id is required. Fall back to DEFAULT_GROUP_ID only
+        # if the caller explicitly didn't specify — that's less surprising
+        # than always overwriting the request arg like the old path did.
+        from jarvis_memory import handoff as handoff_module
 
-        snapshot_data = {
-            "type": "session_snapshot",
-            "task": args["task"],
-            "status": args.get("status", "in_progress"),
-            "completed": args.get("completed", []),
-            "in_progress": args.get("in_progress", []),
-            "next_steps": args.get("next_steps", []),
-            "key_decisions": args.get("key_decisions", []),
-            "blockers": args.get("blockers", []),
-            "files_modified": args.get("files_modified", []),
+        group_id = args.get("group_id") or DEFAULT_GROUP_ID
+        driver = get_driver()
+        try:
+            result = handoff_module.save_state_snapshot(
+                driver,
+                group_id=group_id,
+                task=args["task"],
+                status=args.get("status", "in_progress"),
+                completed=args.get("completed", []),
+                in_progress=args.get("in_progress", []),
+                next_steps=args.get("next_steps", []),
+                blockers=args.get("blockers", []),
+                key_decisions=args.get("key_decisions", []),
+                files_modified=args.get("files_modified", []),
+                device=DEVICE_ID,
+                session_id=args.get("session_id"),
+                idempotency_key=args.get("idempotency_key"),
+                session_key=args.get("session_key"),
+                source="mcp",
+            )
+        except handoff_module.GroupIDRequired as e:
+            return {"saved": False, "error": str(e)}
+        return {
+            "saved": True,
+            "snapshot_id": result["snapshot_id"],
+            "session_id": result["session_id"],
+            "group_id": result["group_id"],
+            "idempotent_hit": result["idempotent_hit"],
         }
-
-        sm = SessionManager()
-        snm = SnapshotManager(driver=sm._driver)
-        snapshot_id = snm.save_snapshot(session_id, snapshot_data)
-        sm.close()
-
-        if snapshot_id is None:
-            return {"saved": False, "error": "Failed to save snapshot"}
-        return {"saved": True, "snapshot_id": snapshot_id, "session_id": session_id}
 
     elif name == "get_session":
         sm = SessionManager()
@@ -1075,35 +1115,65 @@ async def _dispatch(
         }
 
     elif name == "session_handoff":
-        group_id = DEFAULT_GROUP_ID
-        session_id = args.get("session_id") or _get_or_create_session_id(group_id)
+        # Contract: group_id is required (schema-enforced). No more silent
+        # DEFAULT_GROUP_ID fallback — if the caller didn't specify, we fail loud.
+        from jarvis_memory import handoff as handoff_module
 
-        sm = SessionManager()
-        snm = SnapshotManager(driver=sm._driver)
+        if not args.get("group_id"):
+            return {"handoff_ready": False, "error": "group_id is required"}
 
-        snapshot_data = {
-            "type": "handoff_snapshot",
-            "task": args["task"],
-            "status": "handoff",
-            "next_steps": args.get("next_steps", []),
-            "notes": args.get("notes", ""),
-            "device": DEVICE_ID,
-        }
-        snapshot_id = snm.save_snapshot(session_id, snapshot_data)
-        sm.end_session(session_id, status="handoff")
-        sm.close()
+        driver = get_driver()
+        try:
+            result = handoff_module.save_handoff(
+                driver,
+                group_id=args["group_id"],
+                task=args["task"],
+                next_steps=args.get("next_steps", []),
+                notes=args.get("notes", ""),
+                device=DEVICE_ID,
+                session_id=args.get("session_id"),
+                idempotency_key=args.get("idempotency_key"),
+                session_key=args.get("session_key"),
+                source="mcp",
+            )
+        except handoff_module.GroupIDRequired as e:
+            return {"handoff_ready": False, "error": str(e)}
 
         return {
             "handoff_ready": True,
-            "session_id": session_id,
-            "snapshot_id": snapshot_id,
+            "group_id": result.group_id,
+            "session_id": result.session_id,
+            "snapshot_id": result.snapshot_id,
+            "episode_id": result.episode_id,
+            "idempotent_hit": result.idempotent_hit,
             "task": args["task"],
             "next_steps": args.get("next_steps", []),
             "notes": args.get("notes", ""),
-            "instruction": "Next session on any device: call continue_session with the group_id to pick up where this left off.",
+            "instruction": "Next session: call continue_session or latest_handoff with the same group_id.",
         }
 
     # ── v2 Tools ──────────────────────────────────────────────────────
+
+    elif name == "latest_handoff":
+        from jarvis_memory import handoff as handoff_module
+        driver = get_driver()
+        try:
+            result = handoff_module.get_latest_handoff(
+                driver,
+                group_id=args["group_id"],
+                max_age_hours=args.get("max_age_hours", 72),
+            )
+        except handoff_module.GroupIDRequired as e:
+            return {"error": str(e)}
+        if result is None:
+            return {"found": False, "group_id": args["group_id"]}
+        return {"found": True, **result}
+
+    elif name == "list_groups":
+        from jarvis_memory import handoff as handoff_module
+        driver = get_driver()
+        groups = handoff_module.list_groups(driver)
+        return {"groups": groups, "count": len(groups)}
 
     elif name == "wake_up":
         store = get_embed_store()

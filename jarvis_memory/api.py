@@ -49,11 +49,13 @@ _load_env_file()
 
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .config import (
@@ -124,6 +126,23 @@ def _get_embed_store():
 
 # ── Lifespan ────────────────────────────────────────────────────────────
 
+# ── Bearer-auth helpers (middleware registered below, after `app`) ─────
+#
+# Fixes Astack VPS ship-gate bug B8: the REST API previously enforced no
+# auth on non-health routes, so a leaked port = a writable memory store.
+
+_AUTH_EXEMPT_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _bearer_token() -> Optional[str]:
+    tok = os.environ.get("JARVIS_API_BEARER_TOKEN")
+    return tok.strip() if tok and tok.strip() else None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: verify Neo4j. Shutdown: close driver."""
@@ -133,6 +152,20 @@ async def lifespan(app: FastAPI):
         logger.info("jarvis-memory API ready")
     except Exception as e:
         logger.warning(f"Startup check failed (will retry on first request): {e}")
+
+    # Non-loopback + no-bearer: shout loudly (or refuse if strict).
+    if not _is_loopback_host(API_HOST) and _bearer_token() is None:
+        strict = os.environ.get("JARVIS_REQUIRE_AUTH", "0") == "1"
+        msg = (
+            f"API bound to non-loopback host {API_HOST!r} with no "
+            "JARVIS_API_BEARER_TOKEN set. Any process that reaches this "
+            "port can read/write memory. Set JARVIS_API_BEARER_TOKEN or "
+            "bind to 127.0.0.1 to close this hole."
+        )
+        if strict:
+            raise RuntimeError(msg + " (JARVIS_REQUIRE_AUTH=1)")
+        logger.warning("SECURITY: %s", msg)
+
     yield
     global _neo4j_driver
     if _neo4j_driver:
@@ -149,6 +182,36 @@ app = FastAPI(
     description="Standalone REST API for jarvis-memory (Neo4j + ChromaDB). No legacy Mem0/Qdrant.",
     lifespan=lifespan,
 )
+
+
+# ── Bearer-auth middleware (registered on `app`) ───────────────────────
+#
+# If JARVIS_API_BEARER_TOKEN is set, every non-exempt request must present
+# "Authorization: Bearer <token>". No token + loopback bind = allow-all
+# (local-dev default). No token + non-loopback bind = allow-all with a
+# startup warning (see lifespan); JARVIS_REQUIRE_AUTH=1 flips that to a
+# startup refusal for strict deployments.
+
+@app.middleware("http")
+async def bearer_auth(request: Request, call_next):
+    if request.url.path in _AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+
+    token = _bearer_token()
+    if token is None:
+        return await call_next(request)
+
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Bearer "):
+        return JSONResponse(
+            {"detail": "Missing bearer token. Send Authorization: Bearer <token>."},
+            status_code=401,
+        )
+    supplied = header[len("Bearer "):].strip()
+    import hmac as _hmac
+    if not _hmac.compare_digest(supplied, token):
+        return JSONResponse({"detail": "Invalid bearer token."}, status_code=401)
+    return await call_next(request)
 
 
 # ── Request Models ──────────────────────────────────────────────────────
@@ -192,6 +255,12 @@ class SessionHandoffRequest(BaseModel):
     group_id: str
     next_steps: list[str] = []
     notes: str = ""
+    # v1.1 contract additions (all optional for backward compat):
+    device: Optional[str] = None
+    session_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    session_key: Optional[str] = None
+    source: Optional[str] = None
 
 
 class SaveStateRequest(BaseModel):
@@ -204,6 +273,12 @@ class SaveStateRequest(BaseModel):
     blockers: list[str] = []
     key_decisions: list[str] = []
     files_modified: list[str] = []
+    # v1.1 contract additions:
+    device: Optional[str] = None
+    session_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    session_key: Optional[str] = None
+    source: Optional[str] = None
 
 
 # === RUN 2 — ENTITY LAYER ===
@@ -326,25 +401,46 @@ async def health():
 # ── v1 compatibility shim (for OpenClaw hooks during migration) ─────────
 
 class V1AddRequest(BaseModel):
-    """Accepts the old memclawz /api/v1/add payload format."""
+    """Accepts the old memclawz /api/v1/add payload format.
+
+    v1.1 contract: ``group_id`` at top level is preferred. If missing, we fall
+    back to ``metadata.group_id`` (older OpenClaw hook shape). If both missing,
+    we route to ``system`` with a WARNING log so the pollution is visible.
+    """
     content: str
     user_id: str = "yoni"
     agent_id: str = "main"
     memory_type: str = "fact"
     metadata: Optional[dict] = None
+    # v1.1: top-level group_id. Optional for backward compat — hooks that
+    # haven't been updated still land via metadata.group_id.
+    group_id: Optional[str] = None
 
 
 @app.post("/api/v1/add")
 async def v1_add_compat(req: V1AddRequest):
     """Thin v1 compatibility layer — routes to save_episode.
 
-    OpenClaw's mem0-extractor hook POSTs to /api/v1/add. This shim
-    catches those requests and routes them through the v2 pipeline
-    so nothing breaks during migration.
+    OpenClaw's mem0-extractor hook POSTs to /api/v1/add. This shim catches
+    those requests and routes them through the v2 pipeline.
+
+    group_id precedence: top-level > metadata.group_id > 'system' (with warn).
     """
-    group_id = "system"
-    if req.metadata and "group_id" in req.metadata:
-        group_id = req.metadata["group_id"]
+    group_id: Optional[str] = None
+    if req.group_id and req.group_id.strip():
+        group_id = req.group_id.strip()
+    elif req.metadata and isinstance(req.metadata.get("group_id"), str) and req.metadata["group_id"].strip():
+        group_id = req.metadata["group_id"].strip()
+
+    if group_id is None:
+        # Don't fail hard (legacy hooks depend on this path), but surface the
+        # drift loudly so it can be cleaned up. v2.0 will flip this to a 400.
+        logger.warning(
+            "v1_add: no group_id on /api/v1/add — falling back to 'system'. "
+            "Update the caller (user_id=%s, agent_id=%s) to pass group_id at top level.",
+            req.user_id, req.agent_id,
+        )
+        group_id = "system"
 
     return await save_episode(SaveEpisodeRequest(
         content=req.content,
@@ -745,55 +841,70 @@ async def list_sessions(group_id: str, limit: int = 10):
 
 @app.post("/api/v2/session/handoff")
 async def session_handoff(req: SessionHandoffRequest):
-    """Prepare a handoff package for cross-device continuation."""
+    """Write a session handoff: snapshot + retrievable [HANDOFF] Episode.
+
+    Contract:
+      - ``group_id`` required (Pydantic-enforced).
+      - If no session exists for the group, one is created on the fly.
+      - If ``idempotency_key`` is set and a handoff with the same key
+        exists in the last hour for this session, the write is a no-op
+        and the existing IDs are returned.
+
+    Returns: ``{handoff_ready, group_id, session_id, snapshot_id, episode_id,
+              idempotent_hit, next_steps, task}``.
+    """
     try:
-        from .conversation import SessionManager
+        from . import handoff as handoff_module
 
-        sm = SessionManager()
-        # Save state first
-        latest = sm.get_latest_session(req.group_id)
-        if not latest:
-            sm.close()
-            raise HTTPException(status_code=404, detail=f"No active session for {req.group_id}")
-
-        session_id = latest["uuid"]
-        sm.save_state(
-            session_id=session_id,
+        driver = _get_driver()
+        result = handoff_module.save_handoff(
+            driver,
+            group_id=req.group_id,
             task=req.task,
-            status="handoff",
             next_steps=req.next_steps,
+            notes=req.notes,
+            device=req.device or DEVICE_ID,
+            session_id=req.session_id,
+            idempotency_key=req.idempotency_key,
+            session_key=req.session_key,
+            source=req.source or "rest",
         )
-        sm.close()
-
         return {
-            "status": "handoff_ready",
-            "session_id": session_id,
-            "group_id": req.group_id,
+            "handoff_ready": True,
+            "group_id": result.group_id,
+            "session_id": result.session_id,
+            "snapshot_id": result.snapshot_id,
+            "episode_id": result.episode_id,
+            "idempotent_hit": result.idempotent_hit,
             "task": req.task,
             "next_steps": req.next_steps,
         }
+    except handoff_module.GroupIDRequired as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"session_handoff failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("session_handoff failed")
+        raise HTTPException(status_code=500, detail="Internal error writing handoff.")
 
 
 @app.post("/api/v2/session/save_state")
 async def save_state(req: SaveStateRequest):
-    """Save a full session state snapshot."""
+    """Save a session state snapshot (non-terminal; no Episode written).
+
+    Contract: ``group_id`` required. Creates a session if none exists for
+    this group. Honors ``idempotency_key`` (last hour).
+
+    Use ``/api/v2/session/handoff`` when you want a retrievable handoff
+    Episode; use this when you want to checkpoint progress mid-session.
+    """
     try:
-        from .conversation import SessionManager
+        from . import handoff as handoff_module
 
-        sm = SessionManager()
-        latest = sm.get_latest_session(req.group_id)
-        if not latest:
-            sm.close()
-            raise HTTPException(status_code=404, detail=f"No active session for {req.group_id}")
-
-        session_id = latest["uuid"]
-        sm.save_state(
-            session_id=session_id,
+        driver = _get_driver()
+        result = handoff_module.save_state_snapshot(
+            driver,
+            group_id=req.group_id,
             task=req.task,
             status=req.status,
             completed=req.completed,
@@ -802,15 +913,73 @@ async def save_state(req: SaveStateRequest):
             blockers=req.blockers,
             key_decisions=req.key_decisions,
             files_modified=req.files_modified,
+            device=req.device or DEVICE_ID,
+            session_id=req.session_id,
+            idempotency_key=req.idempotency_key,
+            session_key=req.session_key,
+            source=req.source or "rest",
         )
-        sm.close()
-
-        return {"status": "saved", "session_id": session_id, "group_id": req.group_id}
+        return {
+            "status": "saved",
+            "group_id": result["group_id"],
+            "session_id": result["session_id"],
+            "snapshot_id": result["snapshot_id"],
+            "idempotent_hit": result["idempotent_hit"],
+        }
+    except handoff_module.GroupIDRequired as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"save_state failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("save_state failed")
+        raise HTTPException(status_code=500, detail="Internal error saving session state.")
+
+
+@app.get("/api/v2/handoff/latest")
+async def latest_handoff(group_id: str, max_age_hours: int = 72):
+    """Return the most recent [HANDOFF] Episode for ``group_id``.
+
+    Returns ``404`` if no handoff found within ``max_age_hours``.
+    This is the read path the PreCompact → SessionStart flow depends on.
+    """
+    try:
+        from . import handoff as handoff_module
+
+        driver = _get_driver()
+        result = handoff_module.get_latest_handoff(
+            driver, group_id=group_id, max_age_hours=max_age_hours,
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No handoff within the last {max_age_hours}h for group_id={group_id!r}",
+            )
+        return result
+    except handoff_module.GroupIDRequired as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("latest_handoff failed")
+        raise HTTPException(status_code=500, detail="Internal error reading handoff.")
+
+
+@app.get("/api/v2/groups")
+async def list_groups():
+    """Return every known ``group_id`` with episode + session counts.
+
+    Use this to debug "where did my memory go?" or to spot-check that
+    a recent write landed in the right group.
+    """
+    try:
+        from . import handoff as handoff_module
+
+        driver = _get_driver()
+        groups = handoff_module.list_groups(driver)
+        return {"groups": groups, "count": len(groups)}
+    except Exception as e:
+        logger.exception("list_groups failed")
+        raise HTTPException(status_code=500, detail="Internal error listing groups.")
 
 
 # ── Entry point ─────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ Jarvis, and injects a concise context block into the new session.
         "hooks": [
           {
             "type": "command",
-            "command": "<JARVIS_MEMORY_ROOT>/.venv/bin/python <JARVIS_MEMORY_ROOT>/hooks/claude_code_sessionstart.py",
+            "command": "<REPO_ROOT>/.venv/bin/python <REPO_ROOT>/hooks/claude-code/sessionstart.py",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@ Jarvis, and injects a concise context block into the new session.
         "hooks": [
           {
             "type": "command",
-            "command": "<JARVIS_MEMORY_ROOT>/.venv/bin/python <JARVIS_MEMORY_ROOT>/hooks/claude_code_sessionstart.py",
+            "command": "<REPO_ROOT>/.venv/bin/python <REPO_ROOT>/hooks/claude-code/sessionstart.py",
             "timeout": 10
           }
         ]
@@ -61,7 +61,8 @@ Markdown block with:
 - Always exits 0 — never blocks session start
 - Keeps injected context under ~2000 chars
 - Silent on no-activity projects (first session for group_id)
-- All errors logged to $JARVIS_LOG_DIR/sessionstart-hook.log (default ~/.jarvis-memory/logs/)
+- All errors logged to ``${JARVIS_LOG_DIR}/sessionstart-hook.log``
+  (defaults to ``~/.jarvis-memory/logs/``)
 """
 from __future__ import annotations
 
@@ -87,14 +88,7 @@ if env_file.exists():
         val = val.split("#", 1)[0].strip()
         os.environ.setdefault(key.strip(), val)
 
-# Log location is parameterized so client installs don't require an
-# Atlas workspace. Default is ~/.jarvis-memory/logs/; override with
-# JARVIS_LOG_DIR.
-LOG_DIR = Path(os.environ.get("JARVIS_LOG_DIR", str(Path.home() / ".jarvis-memory" / "logs")))
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "sessionstart-hook.log"
-# ATLAS_ROOT is only used for group_id auto-detection inside Alex's Atlas
-# workspace. Client installs don't have one; detection falls through to "system".
+LOG_FILE = Path.home() / "Atlas" / "brain" / "logs" / "sessionstart-hook.log"
 ATLAS_ROOT = Path.home() / "Atlas"
 
 logging.basicConfig(

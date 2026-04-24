@@ -109,14 +109,37 @@ check "Intent classifier returns expected categories" \
 # ── 6. MCP parity ─────────────────────────────────────────
 echo ""
 echo "[6] MCP server"
-check "MCP tool count = 27 (parity lock)" \
+check "MCP tool count = 29 (parity lock — 23 Run 1 + 4 Run 2 + 2 v1.1 handoff)" \
     python -c "
 import re, pathlib
 src = pathlib.Path('mcp_server/server.py').read_text()
 # Count the Tool(name=\"...\") literals inside the list_tools() function.
 names = re.findall(r'Tool\(\s*\n\s*name=\"([^\"]+)\"', src)
-assert len(names) == 27, f'expected 27 Tool literals, found {len(names)}: {names}'
+assert len(names) == 29, f'expected 29 Tool literals, found {len(names)}: {names}'
 "
+
+# ── 6b. Handoff contract ──────────────────────────────────
+echo ""
+echo "[6b] Handoff contract"
+check "jarvis_memory.handoff imports" \
+    python -c "from jarvis_memory.handoff import save_handoff, get_latest_handoff, list_groups, GroupIDRequired"
+check "handoff validation rejects empty group_id" \
+    python -c "
+from jarvis_memory.handoff import _validate_group_id, GroupIDRequired
+import pytest
+try:
+    _validate_group_id('')
+    raise AssertionError('empty group_id should have raised')
+except GroupIDRequired:
+    pass
+try:
+    _validate_group_id(None)
+    raise AssertionError('None group_id should have raised')
+except GroupIDRequired:
+    pass
+"
+check "jarvis CLI is installed" \
+    bash -c "command -v jarvis >/dev/null"
 
 # ── 7. Pytest smoke ───────────────────────────────────────
 echo ""

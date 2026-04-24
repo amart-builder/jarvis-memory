@@ -2,11 +2,11 @@
 
 Registers two hooks in ``~/.claude/settings.json``:
 
-  - ``SessionStart`` (startup + resume) → ``claude_code_sessionstart.py``
+  - ``SessionStart`` (startup + resume) → ``hooks/claude-code/sessionstart.py``
     Injects recent context from jarvis-memory at the start of each
     Claude Code session, so the agent picks up where the last run left off.
 
-  - ``PreCompact`` → ``claude_code_precompact.py``
+  - ``PreCompact`` → ``hooks/claude-code/precompact.py``
     Writes a [HANDOFF] episode before Claude Code auto-compacts, preserving
     the conversation's key state for the next session.
 
@@ -18,6 +18,9 @@ Usage:
     python3 install_hooks.py --uninstall    # remove jarvis-memory hooks
 
 The script is idempotent: safe to run multiple times.
+
+Note: OpenClaw hooks (``hooks/openclaw/*``) are registered through
+OpenClaw's own hook runtime and are NOT touched by this script.
 """
 from __future__ import annotations
 
@@ -27,11 +30,11 @@ import os
 import sys
 from pathlib import Path
 
-# Resolve paths based on this file's location
+# Resolve paths based on this file's location.
 REPO_ROOT = Path(__file__).resolve().parent
 VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
-SESSIONSTART_HOOK = REPO_ROOT / "hooks" / "claude_code_sessionstart.py"
-PRECOMPACT_HOOK = REPO_ROOT / "hooks" / "claude_code_precompact.py"
+SESSIONSTART_HOOK = REPO_ROOT / "hooks" / "claude-code" / "sessionstart.py"
+PRECOMPACT_HOOK = REPO_ROOT / "hooks" / "claude-code" / "precompact.py"
 
 CLAUDE_DIR = Path.home() / ".claude"
 SETTINGS_PATH = CLAUDE_DIR / "settings.json"
@@ -43,9 +46,7 @@ HOOK_MARKER = "__jarvis_memory__"
 
 def build_hook_entries() -> dict:
     """Build the hook entries for ~/.claude/settings.json."""
-    # Use the venv python if available, otherwise fall back to system python3.
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else "python3"
-
     sessionstart_cmd = f"{python_bin} {SESSIONSTART_HOOK}"
     precompact_cmd = f"{python_bin} {PRECOMPACT_HOOK}"
 
@@ -78,7 +79,6 @@ def build_hook_entries() -> dict:
 
 
 def load_settings() -> dict:
-    """Load existing Claude Code settings, or return an empty skeleton."""
     if not SETTINGS_PATH.exists():
         return {}
     try:
@@ -109,14 +109,14 @@ def strip_our_hooks(settings: dict) -> dict:
 def install() -> None:
     if not SESSIONSTART_HOOK.exists() or not PRECOMPACT_HOOK.exists():
         print(
-            f"ERROR: hook scripts missing under {REPO_ROOT / 'hooks'}\n"
+            f"ERROR: hook scripts missing under {REPO_ROOT / 'hooks' / 'claude-code'}\n"
             f"Expected:\n  {SESSIONSTART_HOOK}\n  {PRECOMPACT_HOOK}",
             file=sys.stderr,
         )
         sys.exit(1)
 
     settings = load_settings()
-    settings = strip_our_hooks(settings)  # idempotent
+    settings = strip_our_hooks(settings)
 
     new_hooks = build_hook_entries()
     existing_hooks = settings.setdefault("hooks", {})
@@ -127,8 +127,8 @@ def install() -> None:
 
     python_status = "venv" if VENV_PYTHON.exists() else "system python3"
     print(f"✓ Hooks installed in {SETTINGS_PATH}")
-    print(f"  SessionStart → {SESSIONSTART_HOOK.name} ({python_status})")
-    print(f"  PreCompact   → {PRECOMPACT_HOOK.name} ({python_status})")
+    print(f"  SessionStart → hooks/claude-code/sessionstart.py ({python_status})")
+    print(f"  PreCompact   → hooks/claude-code/precompact.py ({python_status})")
     print()
     print("Start a new Claude Code session to activate the hooks.")
 
@@ -138,7 +138,6 @@ def uninstall() -> None:
     if not settings.get("hooks"):
         print("No hooks found in settings.json — nothing to uninstall.")
         return
-
     settings = strip_our_hooks(settings)
     save_settings(settings)
     print(f"✓ jarvis-memory hooks removed from {SETTINGS_PATH}")
@@ -152,7 +151,6 @@ def main() -> None:
         help="Remove jarvis-memory hooks from ~/.claude/settings.json",
     )
     args = parser.parse_args()
-
     if args.uninstall:
         uninstall()
     else:

@@ -1,16 +1,17 @@
 """MCP surface parity — the frozen tool surface.
 
 Run 1 baseline: 23 tools. Run 2 (entity layer) adds 4 more: find_orphans,
-doctor, get_page, list_pages — bringing the total to 27. This test
-prevents accidental drift; update EXPECTED_TOOL_NAMES only through a
-spec change.
+doctor, get_page, list_pages — bringing the total to 27. v1.1 (handoff
+contract) adds 2 more: latest_handoff, list_groups — bringing the total
+to 29. This test prevents accidental drift; update EXPECTED_TOOL_NAMES
+only through a spec change.
 """
 from __future__ import annotations
 
 from mcp_server.server import JARVIS_TOOLS
 
 
-# The 27 MCP tools — 23 from Run 1 + 4 new in Run 2 (entity layer).
+# The 29 MCP tools — 23 Run 1 + 4 Run 2 + 2 handoff contract (v1.1).
 EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
     {
         # Run 1 baseline (23)
@@ -42,13 +43,16 @@ EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
         "doctor",
         "get_page",
         "list_pages",
+        # v1.1 handoff contract additions (2)
+        "latest_handoff",
+        "list_groups",
     }
 )
 
 
-def test_tool_count_is_27():
-    assert len(JARVIS_TOOLS) == 27, (
-        f"expected exactly 27 MCP tools (23 Run 1 + 4 Run 2), "
+def test_tool_count_is_29():
+    assert len(JARVIS_TOOLS) == 29, (
+        f"expected exactly 29 MCP tools (23 Run 1 + 4 Run 2 + 2 v1.1), "
         f"found {len(JARVIS_TOOLS)}: {[t.name for t in JARVIS_TOOLS]}"
     )
 
