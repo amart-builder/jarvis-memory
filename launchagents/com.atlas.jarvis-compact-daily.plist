@@ -7,9 +7,9 @@
 
     <key>ProgramArguments</key>
     <array>
-        <!-- NOTE: these paths assume the Mac Mini install at ~/Atlas. Adjust for the MBP if needed. -->
-        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python</string>
-        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/scripts/run_compaction.py</string>
+        <!-- Template: run scripts/generate_launchagents.sh to substitute {{JARVIS_ROOT}} + {{LOG_DIR}}. -->
+        <string>{{JARVIS_ROOT}}/.venv/bin/python</string>
+        <string>{{JARVIS_ROOT}}/scripts/run_compaction.py</string>
         <string>--tier</string>
         <string>daily</string>
     </array>
@@ -28,12 +28,12 @@
 
     <!-- Logs -->
     <key>StandardOutPath</key>
-    <string>/Users/alexanderjmartin/Atlas/brain/logs/jarvis-compact-daily.out</string>
+    <string>{{LOG_DIR}}/jarvis-compact-daily.out</string>
     <key>StandardErrorPath</key>
-    <string>/Users/alexanderjmartin/Atlas/brain/logs/jarvis-compact-daily.err</string>
+    <string>{{LOG_DIR}}/jarvis-compact-daily.err</string>
 
     <key>WorkingDirectory</key>
-    <string>/Users/alexanderjmartin/Atlas/jarvis-memory</string>
+    <string>{{JARVIS_ROOT}}</string>
 
     <key>EnvironmentVariables</key>
     <dict>

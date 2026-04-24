@@ -20,8 +20,35 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import Any
+
+
+def _load_env_file() -> None:
+    """Load ``.env`` from the repo root into ``os.environ`` before the
+    migrator reads NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD via
+    :mod:`jarvis_memory.config`.
+
+    Without this, a user who populated ``.env`` via ``client-install.sh``
+    still hits the config defaults (``bolt://localhost:7687``) when this
+    script runs as a subprocess that never sourced ``.env`` in its shell.
+    Uses ``setdefault`` so parent-shell exports win.
+    """
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        val = val.split("#", 1)[0].strip()
+        os.environ.setdefault(key.strip(), val)
+
+
+_load_env_file()
 
 
 def _parse_args() -> argparse.Namespace:

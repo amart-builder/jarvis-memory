@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis-Memory daily compaction (merge near-duplicate memories from last 24h)
+Wants=jarvis-compact-daily.timer
+
+[Service]
+Type=oneshot
+User={{USER}}
+WorkingDirectory={{JARVIS_ROOT}}
+ExecStart={{JARVIS_ROOT}}/.venv/bin/python {{JARVIS_ROOT}}/scripts/run_compaction.py --tier daily
+StandardOutput=append:{{LOG_DIR}}/jarvis-compact-daily.log
+StandardError=append:{{LOG_DIR}}/jarvis-compact-daily.log
+EnvironmentFile=-{{JARVIS_ROOT}}/.env
+
+[Install]
+WantedBy=multi-user.target
