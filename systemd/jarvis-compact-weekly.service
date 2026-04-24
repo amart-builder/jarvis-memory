@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis-Memory weekly compaction (deeper merge of similar memories from last 7d)
+Wants=jarvis-compact-weekly.timer
+
+[Service]
+Type=oneshot
+User={{USER}}
+WorkingDirectory={{JARVIS_ROOT}}
+ExecStart={{JARVIS_ROOT}}/.venv/bin/python {{JARVIS_ROOT}}/scripts/run_compaction.py --tier weekly
+StandardOutput=append:{{LOG_DIR}}/jarvis-compact-weekly.log
+StandardError=append:{{LOG_DIR}}/jarvis-compact-weekly.log
+EnvironmentFile=-{{JARVIS_ROOT}}/.env
+
+[Install]
+WantedBy=multi-user.target

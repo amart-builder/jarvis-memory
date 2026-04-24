@@ -8,8 +8,8 @@
     <!-- Long-lived daemon. Launchd keeps it alive if it crashes. -->
     <key>ProgramArguments</key>
     <array>
-        <!-- Paths assume the Mac Mini install at ~/Atlas. Adjust for the MBP if needed. -->
-        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python</string>
+        <!-- Template: run scripts/generate_launchagents.sh to substitute {{JARVIS_ROOT}} + {{LOG_DIR}}. -->
+        <string>{{JARVIS_ROOT}}/.venv/bin/python</string>
         <string>-m</string>
         <string>jarvis_memory.minions</string>
         <string>worker</string>
@@ -40,13 +40,13 @@
 
     <!-- Working directory: project root (same as compaction plists). -->
     <key>WorkingDirectory</key>
-    <string>/Users/alexanderjmartin/Atlas/jarvis-memory</string>
+    <string>{{JARVIS_ROOT}}</string>
 
-    <!-- stdout/stderr captured to ~/Atlas/logs/ so Atlas can tail + rotate. -->
+    <!-- stdout/stderr captured to {{LOG_DIR}} for tailing + rotation. -->
     <key>StandardOutPath</key>
-    <string>/Users/alexanderjmartin/Atlas/logs/minion-worker.out.log</string>
+    <string>{{LOG_DIR}}/minion-worker.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/alexanderjmartin/Atlas/logs/minion-worker.err.log</string>
+    <string>{{LOG_DIR}}/minion-worker.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -55,7 +55,7 @@
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <!-- SQLite queue file path. Override via env when running multiple workers. -->
         <key>MINIONS_DB_PATH</key>
-        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/data/minions.sqlite</string>
+        <string>{{JARVIS_ROOT}}/data/minions.sqlite</string>
         <!-- Shell handler is DEFAULT DISABLED. Set GBRAIN_ALLOW_SHELL_JOBS=1 here
              ONLY after a deliberate review of which handlers are registered. -->
         <key>GBRAIN_ALLOW_SHELL_JOBS</key>

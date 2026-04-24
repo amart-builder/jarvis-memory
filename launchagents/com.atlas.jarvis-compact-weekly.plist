@@ -7,8 +7,9 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python</string>
-        <string>/Users/alexanderjmartin/Atlas/jarvis-memory/scripts/run_compaction.py</string>
+        <!-- Template: run scripts/generate_launchagents.sh to substitute {{JARVIS_ROOT}} + {{LOG_DIR}}. -->
+        <string>{{JARVIS_ROOT}}/.venv/bin/python</string>
+        <string>{{JARVIS_ROOT}}/scripts/run_compaction.py</string>
         <string>--tier</string>
         <string>weekly</string>
     </array>
@@ -28,12 +29,12 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/alexanderjmartin/Atlas/brain/logs/jarvis-compact-weekly.out</string>
+    <string>{{LOG_DIR}}/jarvis-compact-weekly.out</string>
     <key>StandardErrorPath</key>
-    <string>/Users/alexanderjmartin/Atlas/brain/logs/jarvis-compact-weekly.err</string>
+    <string>{{LOG_DIR}}/jarvis-compact-weekly.err</string>
 
     <key>WorkingDirectory</key>
-    <string>/Users/alexanderjmartin/Atlas/jarvis-memory</string>
+    <string>{{JARVIS_ROOT}}</string>
 
     <key>EnvironmentVariables</key>
     <dict>

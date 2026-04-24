@@ -1,15 +1,10 @@
 {
+  "_comment": "Example Claude Code MCP config. Easier: run `python scripts/register_mcp.py --client claude-code` and it will write the right entry into ~/.claude/settings.json automatically. This file is here for reference if you want to register by hand.",
   "mcpServers": {
     "jarvis-memory": {
-      "command": "python3",
-      "args": ["-m", "mcp_server.server"],
-      "cwd": "~/Atlas/jarvis-memory",
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "your-password",
-        "ANTHROPIC_API_KEY": "sk-ant-..."
-      }
+      "command": "<JARVIS_MEMORY_ROOT>/.venv/bin/jarvis-mcp",
+      "args": [],
+      "cwd": "<JARVIS_MEMORY_ROOT>"
     }
   }
 }

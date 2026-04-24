@@ -50,7 +50,10 @@ SESSION_CHAIN_DEPTH = int(os.getenv("JARVIS_SESSION_CHAIN_DEPTH", "3"))
 SNAPSHOT_MAX_SIZE = int(os.getenv("JARVIS_SNAPSHOT_MAX_SIZE", "5000"))
 
 # --- ChromaDB (semantic search sidecar) ---
-CHROMADB_PATH = os.getenv("JARVIS_CHROMADB_PATH", os.path.expanduser("~/Atlas/jarvis-memory/chromadb"))
+# Default to a hidden dotdir under $HOME for portability. Override with
+# JARVIS_CHROMADB_PATH if you want to co-locate with the repo or point at a
+# Docker volume.
+CHROMADB_PATH = os.getenv("JARVIS_CHROMADB_PATH", os.path.expanduser("~/.jarvis-memory/chromadb"))
 CHROMADB_COLLECTION = os.getenv("JARVIS_CHROMADB_COLLECTION", "jarvis_memories")
 EMBEDDING_MODEL = os.getenv("JARVIS_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 

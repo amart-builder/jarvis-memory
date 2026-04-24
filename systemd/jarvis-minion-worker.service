@@ -1,0 +1,24 @@
+[Unit]
+Description=Jarvis-Memory minion worker (durable background job queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{JARVIS_ROOT}}
+ExecStart={{JARVIS_ROOT}}/.venv/bin/python -m jarvis_memory.minions worker --queue default --concurrency 1
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:{{LOG_DIR}}/jarvis-minion-worker.log
+StandardError=append:{{LOG_DIR}}/jarvis-minion-worker.log
+Nice=5
+EnvironmentFile=-{{JARVIS_ROOT}}/.env
+# Shell-job handler stays OFF by default. Flip to 1 only after reviewing
+# which handlers are registered.
+Environment=GBRAIN_ALLOW_SHELL_JOBS=0
+
+[Install]
+WantedBy=multi-user.target
