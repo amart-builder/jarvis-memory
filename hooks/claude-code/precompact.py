@@ -16,7 +16,7 @@ session can pick up where this one left off via continue_session().
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python /Users/alexanderjmartin/Atlas/jarvis-memory/hooks/claude_code_precompact.py",
+            "command": "<REPO_ROOT>/.venv/bin/python <REPO_ROOT>/hooks/claude-code/precompact.py",
             "timeout": 15
           }
         ]
@@ -43,7 +43,8 @@ session can pick up where this one left off via continue_session().
 - Detects `group_id` from cwd (brain/projects/{name}/ → {name}), CLAUDE.md, or fallback to 'system'
 - Parses the last ~10 user messages from the transcript for a concise summary
 - Writes [HANDOFF] episode via direct Neo4j (reliable from both MBP and Mini)
-- On any failure, writes a fallback JSON line to ~/Atlas/brain/logs/precompact-fallback.log
+- On any failure, writes a fallback JSON line to ``${JARVIS_LOG_DIR}/precompact-fallback.log``
+  (defaults to ``~/.jarvis-memory/logs/``)
 - ALWAYS exits 0 — never blocks compaction
 """
 from __future__ import annotations

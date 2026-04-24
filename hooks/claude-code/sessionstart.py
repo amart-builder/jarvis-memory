@@ -16,7 +16,7 @@ Jarvis, and injects a concise context block into the new session.
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python /Users/alexanderjmartin/Atlas/jarvis-memory/hooks/claude_code_sessionstart.py",
+            "command": "<REPO_ROOT>/.venv/bin/python <REPO_ROOT>/hooks/claude-code/sessionstart.py",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@ Jarvis, and injects a concise context block into the new session.
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/alexanderjmartin/Atlas/jarvis-memory/.venv/bin/python /Users/alexanderjmartin/Atlas/jarvis-memory/hooks/claude_code_sessionstart.py",
+            "command": "<REPO_ROOT>/.venv/bin/python <REPO_ROOT>/hooks/claude-code/sessionstart.py",
             "timeout": 10
           }
         ]
@@ -61,7 +61,8 @@ Markdown block with:
 - Always exits 0 — never blocks session start
 - Keeps injected context under ~2000 chars
 - Silent on no-activity projects (first session for group_id)
-- All errors logged to ~/Atlas/brain/logs/sessionstart-hook.log
+- All errors logged to ``${JARVIS_LOG_DIR}/sessionstart-hook.log``
+  (defaults to ``~/.jarvis-memory/logs/``)
 """
 from __future__ import annotations
 
