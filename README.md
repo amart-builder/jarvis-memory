@@ -202,7 +202,7 @@ Edit `.env` (mode 600). Defaults sensible for local dev.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `NEO4J_URI` | `bolt://100.102.6.81:7687` | Neo4j on Mini via Tailscale |
+| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j endpoint. Set to the host running Neo4j; use `bolt://<tailscale-ip>:7687` if Neo4j lives on a different machine on your private network. |
 | `NEO4J_USER` / `NEO4J_PASSWORD` | — | Auth |
 | `ANTHROPIC_API_KEY` | — | LLM classifier for ambiguous episodes (optional) |
 | `JARVIS_W_SEMANTIC` / `W_RECENCY` / `W_IMPORTANCE` | 0.5 / 0.3 / 0.2 | Scored search weights |
@@ -285,10 +285,10 @@ Run `.venv/bin/python -c "from jarvis_memory.embeddings import EmbeddingStore; f
 Check if the LaunchAgents are loaded: `launchctl list | grep jarvis-compact`. If not, re-run `launchagents/INSTALL_COMPACTION_CRON.md`.
 
 **Hook seems to do nothing**
-Tail the log: `tail -f ~/Atlas/brain/logs/{precompact,sessionstart}-hook.log`. Hooks exit 0 even on error to avoid blocking Claude Code.
+Tail the log: `tail -f "${JARVIS_LOG_DIR:-$HOME/.jarvis-memory/logs}/"{precompact,sessionstart}-hook.log`. Hooks exit 0 even on error to avoid blocking Claude Code.
 
 **Neo4j unreachable**
-Test Tailscale: `nc -zv 100.102.6.81 7687`. If down, Mac Mini is offline or Tailscale is disconnected.
+Verify the endpoint: `nc -zv $(echo "$NEO4J_URI" | sed -E 's|^bolt://([^:]+):([0-9]+).*|\1 \2|')`. If Neo4j is on another machine (Tailscale, LAN, Docker), make sure that host is up and reachable.
 
 ## Key files to know
 
