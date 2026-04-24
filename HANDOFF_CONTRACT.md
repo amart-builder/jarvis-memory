@@ -54,7 +54,9 @@ Returns the most recent `Episode` with `memory_type='handoff'` for the given gro
 {"task": "...", "group_id": "X", "idempotency_key": "my-hook-abc123", ...}
 ```
 
-If a caller supplies `idempotency_key` and a handoff with the same key exists in the last hour for the same session, the new write is a no-op and the response has `idempotent_hit=true` with the *existing* `snapshot_id` + `episode_id`. This means hooks can fire twice, retries can be safe, and nothing corrupts the timeline.
+If a caller supplies `idempotency_key` and a handoff with the same key exists in the last hour **for the same `group_id`**, the new write is a no-op and the response has `idempotent_hit=true` with the *existing* `snapshot_id` + `episode_id`. This means hooks can fire twice, retries can be safe, and nothing corrupts the timeline.
+
+> **Scoping note:** dedupe is by `group_id`, not `session_id`. Each successful handoff ends its session, so a retry resolves to a *new* session before the check runs — session-scoped dedupe would miss prior hits. `group_id` is caller-stable across retries, so it's the right key.
 
 **Recommendation for hooks:** derive the key from something deterministic per logical event. Good: `f"precompact-{session_id}-{datetime.now():%Y%m%d%H}"`. Bad: `uuid.uuid4()` (every retry becomes a new handoff).
 

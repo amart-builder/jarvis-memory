@@ -124,19 +124,24 @@ def save_handoff(
                     f"create_session_if_missing=False."
                 )
 
-        # Idempotency check.
+        # Idempotency check. Scoped by group_id + key (NOT session_id): each
+        # successful handoff ends its session with status='handoff', which
+        # `get_latest_session` excludes — so a retry after the first write
+        # resolves to a NEW session_id, and session-scoped idempotency would
+        # miss the prior hit. Keying on group_id keeps dedupe stable across
+        # session resolution regardless of what session_id the caller resolves.
         if idempotency_key:
             existing = _find_existing_handoff(
-                driver, session_id=session_id, idempotency_key=idempotency_key,
+                driver, group_id=group_id, idempotency_key=idempotency_key,
             )
             if existing:
                 logger.info(
-                    "handoff idempotent hit session=%s key=%s", session_id, idempotency_key,
+                    "handoff idempotent hit group=%s key=%s", group_id, idempotency_key,
                 )
                 return HandoffResult(
                     snapshot_id=existing.get("snapshot_id"),
                     episode_id=existing.get("episode_id"),
-                    session_id=session_id,
+                    session_id=existing.get("session_id") or session_id,
                     group_id=group_id,
                     idempotent_hit=True,
                 )
@@ -399,6 +404,10 @@ def get_latest_handoff(
         if row is None:
             return None
         return {
+            # episode_id is canonical; `uuid` is the legacy alias kept so
+            # older clients (and REST callers that shipped before v1.1) don't
+            # break. jarvis-start-guard + CLI both read episode_id.
+            "episode_id": row["uuid"],
             "uuid": row["uuid"],
             "content": row["content"],
             "created_at": str(row["created_at"]),
@@ -468,10 +477,15 @@ def list_groups(driver) -> list[dict[str, Any]]:
 # ── idempotency helpers ──────────────────────────────────────────────
 
 def _find_existing_handoff(
-    driver, *, session_id: str, idempotency_key: str, max_age_hours: int = 1,
+    driver, *, group_id: str, idempotency_key: str, max_age_hours: int = 1,
 ) -> Optional[dict[str, Any]]:
-    """Return {episode_id, snapshot_id} if a handoff with this idempotency_key
-    exists for this session within max_age_hours. Else None.
+    """Return {episode_id, snapshot_id, session_id} if a handoff with this
+    idempotency_key exists for this group_id within max_age_hours. Else None.
+
+    Scoped by group_id (not session_id) because each successful handoff ends
+    its session with status='handoff', so a retry resolves to a new session
+    before the idempotency check runs — session-scoped dedupe misses the hit.
+    group_id is caller-stable: the retry sees the same key.
 
     Matches the Episode AND the Snapshot both by ``idempotency_key`` — the
     two are written atomically with the same key by ``save_handoff``, so
@@ -481,19 +495,25 @@ def _find_existing_handoff(
     with driver.session() as db:
         row = db.run(
             """
-            MATCH (e:Episode {session_id: $sid, idempotency_key: $ik})
+            MATCH (e:Episode {group_id: $gid, idempotency_key: $ik})
             WHERE e.memory_type = 'handoff'
               AND e.created_at >= datetime($cutoff)
-            OPTIONAL MATCH (snap:Snapshot {session_id: $sid, idempotency_key: $ik})
+            OPTIONAL MATCH (snap:Snapshot {group_id: $gid, idempotency_key: $ik})
             WHERE snap.created_at >= datetime($cutoff)
-            RETURN e.uuid AS episode_id, snap.uuid AS snapshot_id
+            RETURN e.uuid AS episode_id,
+                   e.session_id AS session_id,
+                   snap.uuid AS snapshot_id
             ORDER BY e.created_at DESC LIMIT 1
             """,
-            sid=session_id, ik=idempotency_key, cutoff=cutoff,
+            gid=group_id, ik=idempotency_key, cutoff=cutoff,
         ).single()
         if row is None:
             return None
-        return {"episode_id": row["episode_id"], "snapshot_id": row["snapshot_id"]}
+        return {
+            "episode_id": row["episode_id"],
+            "snapshot_id": row["snapshot_id"],
+            "session_id": row["session_id"],
+        }
 
 
 def _find_existing_snapshot(
