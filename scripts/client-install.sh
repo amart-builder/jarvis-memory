@@ -107,7 +107,8 @@ ok "venv activated: $(python -c 'import sys; print(sys.executable)')"
 say "Configuring .env"
 if [[ ! -f "$REPO_ROOT/.env" ]]; then
     cp "$REPO_ROOT/.env.example" "$REPO_ROOT/.env"
-    ok ".env created from .env.example"
+    chmod 600 "$REPO_ROOT/.env"
+    ok ".env created from .env.example (chmod 600)"
 
     if [[ "$ASSUME_YES" == "0" ]]; then
         echo "  Fill in Neo4j + Anthropic credentials now? (You can also edit .env by hand later.)"
@@ -132,13 +133,16 @@ if [[ ! -f "$REPO_ROOT/.env" ]]; then
                 echo "JARVIS_DEVICE_ID=${device_id}" >> "$REPO_ROOT/.env"
             fi
             rm -f "$REPO_ROOT/.env.bak"
-            ok ".env populated"
+            chmod 600 "$REPO_ROOT/.env"
+            ok ".env populated (chmod 600)"
         else
             warn "You MUST edit .env before the next step. File: $REPO_ROOT/.env"
         fi
     fi
 else
-    ok ".env already exists — not overwriting"
+    # Enforce 600 even on existing files — reruns shouldn't leave secrets world-readable.
+    chmod 600 "$REPO_ROOT/.env"
+    ok ".env already exists — chmod 600 enforced"
 fi
 
 # --- 4. Pre-cache embedding model (~90 MB download on first run) ---
