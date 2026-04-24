@@ -1,20 +1,44 @@
+// jarvis-start-guard
+//
+// Fires on `agent:bootstrap` + `message:sent`.
+// On bootstrap: queries `/api/v2/handoff/latest` for each configured group_id
+// and injects a warning into the agent's bootstrap context if a recent
+// handoff was written by ANOTHER system (Claude Code, CLI, etc). This is
+// the "did someone else just work on this?" continuity check.
+// On message:sent: checks whether the assistant's first reply acknowledged
+// the cross-system context — logs a START-GUARD VIOLATION if not.
+//
+// Configuration via env:
+//   JARVIS_MEMORY_API                 base URL (default http://localhost:3500)
+//   JARVIS_API_BEARER_TOKEN           bearer token if the API requires auth
+//   JARVIS_START_GUARD_GROUP_IDS      comma-separated list of group_ids to watch (overrides default)
+//   JARVIS_START_GUARD_LOOKBACK_HOURS default 2
+//   JARVIS_START_GUARD_MAX_WARNINGS   max warnings to inject per bootstrap (default 3)
+//   JARVIS_START_GUARD_STATE_FILE     local state path (default ~/.openclaw/jarvis-start-guard-state.json)
+//   JARVIS_START_GUARD_DRY_RUN        1/true/yes to skip writes
+
 const JARVIS_MEMORY_API = process.env.JARVIS_MEMORY_API ?? "http://localhost:3500";
+const JARVIS_API_BEARER_TOKEN = process.env.JARVIS_API_BEARER_TOKEN ?? "";
 const LOOKBACK_HOURS = Number.parseFloat(process.env.JARVIS_START_GUARD_LOOKBACK_HOURS ?? "2");
-const SEARCH_LIMIT = Number.parseInt(process.env.JARVIS_START_GUARD_SEARCH_LIMIT ?? "4", 10);
 const MAX_WARNING_COUNT = Number.parseInt(process.env.JARVIS_START_GUARD_MAX_WARNINGS ?? "3", 10);
 const STATE_FILE = process.env.JARVIS_START_GUARD_STATE_FILE ?? `${process.env.HOME}/.openclaw/jarvis-start-guard-state.json`;
 const DRY_RUN = /^(1|true|yes)$/i.test(process.env.JARVIS_START_GUARD_DRY_RUN ?? "");
 
-const GROUP_SEARCHES = [
-  { id: "forge", query: "forge foundry spv fund" },
-  { id: "combinator", query: "combinator ai combinator" },
-  { id: "navi", query: "navi rotationfix" },
-  { id: "catalyst", query: "catalyst" },
-  { id: "supernova", query: "supernova amartai content" },
-  { id: "atlas-web", query: "atlas web" },
-  { id: "jarvis", query: "jarvis graphiti neo4j shared memory" },
-  { id: "system", query: "handoff status decision" },
+// Default group_ids to watch for cross-system handoffs. Override via
+// JARVIS_START_GUARD_GROUP_IDS="navi,atlas-system,..." or edit this list.
+const DEFAULT_WATCH_GROUPS = [
+  "navi",
+  "catalyst",
+  "atlas-system",
+  "jarvis",
+  "system",
 ];
+
+function parseGroupIds(): string[] {
+  const env = process.env.JARVIS_START_GUARD_GROUP_IDS ?? "";
+  const list = env.split(",").map((s) => s.trim()).filter(Boolean);
+  return list.length > 0 ? list : DEFAULT_WATCH_GROUPS;
+}
 
 function normalizeWhitespace(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -30,30 +54,18 @@ function toMillis(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function isRecent(value) {
-  const createdAt = toMillis(value);
-  if (!createdAt) return false;
-  return Date.now() - createdAt <= LOOKBACK_HOURS * 60 * 60 * 1000;
-}
-
-function isOtherSystemAgent(agentId) {
-  const agent = String(agentId ?? "").toLowerCase();
-  if (!agent) return true;
-  return !agent.startsWith("openclaw");
-}
-
-function extractMemoryText(result) {
-  return normalizeWhitespace(result?.metadata?.memory ?? result?.memory ?? "");
-}
-
-function extractDeclaredGroupId(memoryText) {
-  const match = memoryText.match(/GROUP_ID:\s*([a-z0-9-]+)/i);
-  return match ? match[1].toLowerCase() : null;
-}
-
-function extractMetadataGroupId(result) {
-  const groupId = normalizeWhitespace(result?.metadata?.group_id ?? result?.group_id ?? "");
-  return groupId ? groupId.toLowerCase() : null;
+// A handoff is "from another system" iff its source/device indicates some
+// non-OpenClaw origin. We skip:
+//   - our own hooks (source starting with "hook:jarvis")
+//   - device == "openclaw"
+// Everything else (Claude Code hooks, CLI writes, REST API, other MCP clients)
+// counts as cross-system context that the OpenClaw agent should acknowledge.
+function isOtherSystem(handoff): boolean {
+  const source = String(handoff?.source ?? "").toLowerCase();
+  const device = String(handoff?.device ?? "").toLowerCase();
+  if (source.startsWith("hook:jarvis")) return false;
+  if (device === "openclaw") return false;
+  return true;
 }
 
 function extractBootstrapFiles(event) {
@@ -106,46 +118,42 @@ function pruneState(state) {
   }
 }
 
-async function searchRecentWarnings() {
-  const seen = new Set();
+async function fetchLatestHandoff(groupId: string) {
+  const url = new URL(`${JARVIS_MEMORY_API}/api/v2/handoff/latest`);
+  url.searchParams.set("group_id", groupId);
+  url.searchParams.set("max_age_hours", String(LOOKBACK_HOURS));
+
+  const headers: Record<string, string> = {};
+  if (JARVIS_API_BEARER_TOKEN) {
+    headers["authorization"] = `Bearer ${JARVIS_API_BEARER_TOKEN}`;
+  }
+
+  try {
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+    if (response.status === 404) return null; // no handoff in window
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function findCrossSystemWarnings() {
+  const watchGroups = parseGroupIds();
   const warnings = [];
 
-  for (const search of GROUP_SEARCHES) {
-    const url = new URL(`${JARVIS_MEMORY_API}/api/v1/search`);
-    url.searchParams.set("q", search.query);
-    url.searchParams.set("limit", String(SEARCH_LIMIT));
+  for (const groupId of watchGroups) {
+    const handoff = await fetchLatestHandoff(groupId);
+    if (!handoff) continue;
+    if (!isOtherSystem(handoff)) continue;
 
-    let payload;
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      if (!response.ok) continue;
-      payload = await response.json();
-    } catch {
-      continue;
-    }
-
-    const results = Array.isArray(payload?.results) ? payload.results : [];
-    for (const result of results) {
-      const memoryId = result?.id;
-      if (!memoryId || seen.has(memoryId)) continue;
-      if (!isRecent(result?.created_at)) continue;
-      if (!isOtherSystemAgent(result?.agent_id)) continue;
-
-      const memoryText = extractMemoryText(result);
-      if (!memoryText) continue;
-      const declaredGroupId = extractMetadataGroupId(result) ?? extractDeclaredGroupId(memoryText);
-      if (!declaredGroupId || declaredGroupId !== search.id) continue;
-
-      seen.add(memoryId);
-      warnings.push({
-        id: memoryId,
-        groupId: declaredGroupId ?? search.id,
-        agentId: result?.agent_id ?? "unknown",
-        createdAt: result?.created_at ?? null,
-        excerpt: summarizeText(memoryText, 220),
-      });
-      break;
-    }
+    warnings.push({
+      id: handoff.episode_id ?? handoff.snapshot_id ?? "",
+      groupId: handoff.group_id ?? groupId,
+      agentId: handoff.source ?? handoff.device ?? "unknown",
+      createdAt: handoff.created_at ?? null,
+      excerpt: summarizeText(handoff.content ?? "", 220),
+    });
   }
 
   return warnings
@@ -154,7 +162,7 @@ async function searchRecentWarnings() {
 }
 
 function buildWarningBlock(warnings, options = {}) {
-  const pendingViolation = Boolean(options.pendingViolation);
+  const pendingViolation = Boolean((options as any).pendingViolation);
   const lines = [
     pendingViolation ? "## JARVIS START GUARD VIOLATION (auto-injected)" : "## JARVIS START GUARD (auto-injected)",
     pendingViolation
@@ -199,7 +207,7 @@ function injectWarningIntoBootstrap(event, warningBlock) {
 }
 
 async function handleBootstrap(event) {
-  const warnings = await searchRecentWarnings();
+  const warnings = await findCrossSystemWarnings();
   if (warnings.length === 0) {
     return;
   }

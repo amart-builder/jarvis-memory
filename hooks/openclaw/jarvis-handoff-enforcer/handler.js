@@ -1,7 +1,22 @@
+// jarvis-handoff-enforcer
+//
+// Fires on `session:compact:before`, `command:new`, and `command:reset`.
+// Writes a snapshot + retrievable [HANDOFF] Episode to jarvis-memory via
+// POST /api/v2/session/handoff (the v1.1 contract endpoint — atomic, idempotent,
+// strict group_id).
+//
+// Configuration via env:
+//   JARVIS_MEMORY_API          base URL (default http://localhost:3500)
+//   JARVIS_API_BEARER_TOKEN    bearer token if the API requires auth
+//   JARVIS_HOOK_MAX_MESSAGES   number of trailing messages to include (default 24)
+//   JARVIS_HOOK_DRY_RUN        1/true/yes to log the payload without POSTing
+//   JARVIS_DEVICE_ID           device identifier on the Episode (default "openclaw")
+
 const JARVIS_MEMORY_API = process.env.JARVIS_MEMORY_API ?? "http://localhost:3500";
+const JARVIS_API_BEARER_TOKEN = process.env.JARVIS_API_BEARER_TOKEN ?? "";
 const MAX_MESSAGES = Number.parseInt(process.env.JARVIS_HOOK_MAX_MESSAGES ?? "24", 10);
-const DEDUPE_FILE = process.env.JARVIS_HOOK_DEDUPE_FILE ?? "/tmp/jarvis-openclaw-hook-cache.json";
 const DRY_RUN = /^(1|true|yes)$/i.test(process.env.JARVIS_HOOK_DRY_RUN ?? "");
+const DEVICE_ID = process.env.JARVIS_DEVICE_ID ?? "openclaw";
 
 // Project routing — add patterns to route handoffs to named group_ids.
 // Each entry: { id: "group-name", patterns: [/keyword/i, /keyword/i] }.
@@ -95,15 +110,17 @@ function getLastByRole(messages, role) {
   return "";
 }
 
-function buildContent({ trigger, sessionKey, groupId, confidence, messages }) {
-  const recentUser = getLastByRole(messages, "user");
-  const recentAssistant = getLastByRole(messages, "assistant");
-  const transcript = buildTranscript(messages);
+function buildTaskLine({ trigger, recentUser }) {
+  if (recentUser) return summarizeText(recentUser, 400);
+  return `OpenClaw handoff (${trigger})`;
+}
 
+function buildNotesBlock({ trigger, sessionKey, groupId, confidence, messages, recentUser, recentAssistant }) {
+  const transcript = buildTranscript(messages);
   return [
     `[COMPLETION] OpenClaw automatic handoff snapshot (${trigger})`,
-    `WHY: Preserve cross-system continuity before compaction or session reset without depending on a manual handoff.`,
-    `IMPACT: Claude and OpenClaw can recover recent state, task context, and next-step clues from Jarvis memory.`,
+    "WHY: Preserve cross-system continuity before compaction or session reset.",
+    "IMPACT: Claude and OpenClaw can recover recent state from jarvis-memory.",
     "",
     `SESSION_KEY: ${sessionKey}`,
     `GROUP_ID: ${groupId}`,
@@ -121,46 +138,21 @@ async function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-async function loadDedupeCache() {
-  try {
-    const fs = await import("node:fs/promises");
-    const raw = await fs.readFile(DEDUPE_FILE, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
+async function postHandoff(payload) {
+  const headers = { "content-type": "application/json" };
+  if (JARVIS_API_BEARER_TOKEN) {
+    headers["authorization"] = `Bearer ${JARVIS_API_BEARER_TOKEN}`;
   }
-}
-
-async function saveDedupeCache(cache) {
-  const fs = await import("node:fs/promises");
-  await fs.writeFile(DEDUPE_FILE, JSON.stringify(cache, null, 2));
-}
-
-async function shouldSkipDuplicate({ sessionKey, trigger, fingerprint }) {
-  const cache = await loadDedupeCache();
-  const key = `${sessionKey}:${trigger}`;
-  const previous = cache[key];
-  if (previous?.fingerprint === fingerprint) {
-    return true;
-  }
-  cache[key] = { fingerprint, at: new Date().toISOString() };
-  await saveDedupeCache(cache);
-  return false;
-}
-
-async function postMemory(payload) {
-  const response = await fetch(`${JARVIS_MEMORY_API}/api/v1/add`, {
+  const response = await fetch(`${JARVIS_MEMORY_API}/api/v2/session/handoff`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(10000),
   });
-
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Jarvis write failed (${response.status}): ${body}`);
+    throw new Error(`v2 handoff failed (${response.status}): ${body}`);
   }
-
   const text = await response.text();
   try {
     return JSON.parse(text);
@@ -188,29 +180,26 @@ const handler = async (event) => {
   }
 
   const { groupId, confidence } = inferGroupId(messages);
-  const content = buildContent({ trigger, sessionKey, groupId, confidence, messages });
-  const fingerprint = await sha256(`${trigger}\n${sessionKey}\n${content}`);
+  const recentUser = getLastByRole(messages, "user");
+  const recentAssistant = getLastByRole(messages, "assistant");
+  const notes = buildNotesBlock({ trigger, sessionKey, groupId, confidence, messages, recentUser, recentAssistant });
+  const task = buildTaskLine({ trigger, recentUser });
 
-  if (await shouldSkipDuplicate({ sessionKey, trigger, fingerprint })) {
-    console.log(`[jarvis-handoff-enforcer] Duplicate snapshot for ${sessionKey} (${trigger}), skipping.`);
-    return;
-  }
+  // Deterministic idempotency key: the server dedupes on this within a 1h
+  // window for the same session. Hashing trigger+sessionKey+notes means
+  // "same logical event, same transcript snapshot" = no duplicate write.
+  const fingerprint = await sha256(`${trigger}\n${sessionKey}\n${notes}`);
+  const idempotencyKey = `handoff-enforcer-${fingerprint.slice(0, 32)}`;
 
   const payload = {
-    content,
-    agent_id: "openclaw-hook",
-    memory_type: "meta",
+    task,
     group_id: groupId,
-    metadata: {
-      source: "hook:jarvis-handoff-enforcer",
-      trigger,
-      session_key: sessionKey,
-      group_confidence: confidence,
-      fingerprint,
-      workspace: process.cwd(),
-      message_count: messages.length,
-      captured_at: new Date().toISOString(),
-    },
+    next_steps: [],
+    notes,
+    device: DEVICE_ID,
+    idempotency_key: idempotencyKey,
+    session_key: sessionKey,
+    source: "hook:jarvis-handoff-enforcer",
   };
 
   if (DRY_RUN) {
@@ -219,9 +208,13 @@ const handler = async (event) => {
     return;
   }
 
-  const result = await postMemory(payload);
-  const memoryId = result?.id ?? result?.memory_id ?? "unknown";
-  console.log(`[jarvis-handoff-enforcer] Wrote Jarvis snapshot ${memoryId} for ${sessionKey} (${groupId}).`);
+  const result = await postHandoff(payload);
+  const snapshotId = result?.snapshot_id ?? "unknown";
+  const episodeId = result?.episode_id ?? "unknown";
+  const idempotentHit = result?.idempotent_hit ? " (idempotent hit)" : "";
+  console.log(
+    `[jarvis-handoff-enforcer] Wrote handoff snapshot=${snapshotId} episode=${episodeId} for ${sessionKey} (${groupId})${idempotentHit}.`
+  );
 };
 
 export default handler;

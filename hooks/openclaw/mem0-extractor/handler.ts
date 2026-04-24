@@ -11,6 +11,12 @@ const MEM0_URL = process.env.MEM0_URL ?? "http://localhost:3500";
 const MEM0_USER_ID = process.env.MEM0_USER_ID ?? "user";
 const MEM0_MAX_MESSAGES = parseInt(process.env.MEM0_MAX_MESSAGES ?? "40", 10);
 
+// Per the handoff contract, every write must carry an explicit group_id.
+// Extractors that don't know a specific project default to "system" but
+// can be overridden per-deployment.
+const MEM0_GROUP_ID = process.env.MEM0_GROUP_ID ?? "system";
+const JARVIS_API_BEARER_TOKEN = process.env.JARVIS_API_BEARER_TOKEN ?? "";
+
 interface Message {
   role: string;
   content: string | Array<{ type: string; text?: string }>;
@@ -87,14 +93,19 @@ const handler = async (event: HookEvent): Promise<void> => {
     }
 
     // POST to Atlas mem0 wrapper: /api/v1/add
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (JARVIS_API_BEARER_TOKEN) {
+      headers["Authorization"] = `Bearer ${JARVIS_API_BEARER_TOKEN}`;
+    }
     const res = await fetch(`${MEM0_URL}/api/v1/add`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         content: transcript,
         user_id: MEM0_USER_ID,
+        group_id: MEM0_GROUP_ID,
         metadata: {
-          source: "hook:session:compact:before",
+          source: "hook:mem0-extractor",
           session_key: sessionKey,
           extracted_at: new Date().toISOString(),
         },
