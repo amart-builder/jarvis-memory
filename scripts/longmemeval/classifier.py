@@ -324,16 +324,16 @@ ABSTENTION_FILTER: dict[str, float | int] = {
 #
 # Floor of 3 hits is enforced regardless of budget — better noisy
 # context than empty.
-# Calibrated against measured median LongMemEval session size of ~10K
-# chars. Earlier 14K budget was a bug-trap: with min_hits=3 floor, the
-# trim always hit the floor first (3 × 10K = 30K > 14K) so the budget
-# never did real work — same behavior as a hard "max_hits=3" cap. 50K
-# allows ~5 typical sessions, which is between the SS max_res of 10-12
-# and the min_hits floor of 3.
-CONTEXT_BUDGET_CHARS: dict[str, int] = {
-    "single-session-user":       50000,
-    "single-session-assistant":  50000,
-    "single-session-preference": 50000,
-    # multi-session, knowledge-update, temporal-reasoning: no trim.
-}
+# Disabled after Stage 1 validation (2026-04-27). The SS context budget
+# was theoretically motivated by "less context = less LLM distraction"
+# but the targeted-validation run showed it contributed to a real
+# regression on question `0a34ad58` (SS-preference) by trimming 10
+# retrieved hits down to 3 and dropping the gold session. We were
+# trading concrete losses for speculative gains; not worth it.
+#
+# The trim infrastructure (``trim_to_context_budget`` in the adapter)
+# is preserved so an explicit per-call budget can still be passed —
+# this dict is just the default lookup, which is now empty so the
+# trim is a no-op for every category.
+CONTEXT_BUDGET_CHARS: dict[str, int] = {}
 CONTEXT_BUDGET_MIN_HITS: int = 3

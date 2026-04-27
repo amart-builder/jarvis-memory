@@ -960,30 +960,28 @@ def test_trim_to_context_budget_empty_input_returns_empty():
     assert trim_to_context_budget([], "multi-session") == []
 
 
-def test_trim_to_context_budget_skips_uncapped_category():
-    """multi-session/temporal/KU are NOT in CONTEXT_BUDGET_CHARS — return all hits."""
+def test_context_budget_dict_is_empty_after_stage1_validation():
+    """Stage 1 validation showed SS trim caused a real regression on
+    question 0a34ad58 — gold session was dropped by the budget cut.
+    Default is now no-op for every category; explicit budget_chars
+    can still be passed for tests/debug."""
     from scripts.run_longmemeval import trim_to_context_budget
     from scripts.longmemeval.classifier import CONTEXT_BUDGET_CHARS
+
+    assert CONTEXT_BUDGET_CHARS == {}, \
+        "default context budgets are disabled — pass explicit budget_chars to trim"
 
     hits = [
         {"uuid": str(i), "content": "x" * 8000, "score": 1.0 - i * 0.01,
          "referenced_date": f"2024-01-{i+1:02d}T00:00:00"}
         for i in range(15)
     ]
-    # MS not in the dict (Atlas's MS=30K trim broke a real temporal
-    # question in smoke; restored to no-trim).
-    assert "multi-session" not in CONTEXT_BUDGET_CHARS
-    assert "knowledge-update" not in CONTEXT_BUDGET_CHARS
-    assert "temporal-reasoning" not in CONTEXT_BUDGET_CHARS
-
-    out_ms = trim_to_context_budget(hits, "multi-session")
-    assert len(out_ms) == 15  # no trim
-    out_tr = trim_to_context_budget(hits, "temporal-reasoning")
-    assert len(out_tr) == 15  # no trim
-
-    # SS is in the dict and DOES trim.
-    out_ss = trim_to_context_budget(hits, "single-session-user")
-    assert len(out_ss) < 15
+    # No trim for any category in default lookup — full input returned.
+    for cat in ("single-session-user", "multi-session", "knowledge-update",
+                "temporal-reasoning", "single-session-assistant",
+                "single-session-preference"):
+        out = trim_to_context_budget(hits, cat)
+        assert len(out) == 15, f"expected no-op trim for {cat}, got {len(out)}"
 
 
 def test_trim_to_context_budget_returns_date_sorted():
@@ -998,12 +996,17 @@ def test_trim_to_context_budget_returns_date_sorted():
     assert [h["uuid"] for h in out] == ["a", "b", "c"]
 
 
-def test_trim_to_context_budget_actually_trims_at_realistic_session_sizes():
-    """50K SS budget allows ~5 sessions at typical ~10K-char real sizes.
+def test_trim_to_context_budget_actually_trims_with_explicit_budget():
+    """The trim machinery still works when an explicit budget is passed.
 
-    Reviewer flagged: smaller test fixtures hid a bug where the
-    min_hits floor dominated every SS run, making the budget a no-op.
-    Use realistic 10K-char hits to exercise the budget path itself.
+    Default-lookup path is no-op now (CONTEXT_BUDGET_CHARS is empty
+    after Stage 1 validation), but explicit ``budget_chars`` keeps
+    the trim available for ad-hoc use or future re-enable.
+
+    50K budget at 10.5K-per-hit: keep iterating while (kept<min_hits)
+    OR (total+c ≤ budget). Iters 1-3 forced by min_hits=3 (total=31.5K).
+    Iter 4: kept=3≥3, 31.5K+10.5K=42K ≤ 50K, append → kept=4, total=42K.
+    Iter 5: kept=4≥3, 42K+10.5K=52.5K > 50K, break. → 4 hits.
     """
     from scripts.run_longmemeval import trim_to_context_budget
     hits = [
@@ -1011,21 +1014,7 @@ def test_trim_to_context_budget_actually_trims_at_realistic_session_sizes():
          "referenced_date": f"2024-01-{i+1:02d}T00:00:00"}
         for i in range(12)
     ]
-    out = trim_to_context_budget(hits, "single-session-user")
-    # 50K / 10.5K ≈ 4.7 → 5 hits fit, 6th breaks budget. Loop appends
-    # while either (kept < min_hits) OR (cumulative + next ≤ budget).
-    # 1: 10.5K (kept=1, < min) → keep
-    # 2: 21K  (kept=2, < min) → keep
-    # 3: 31.5K (kept=3, ≥ min, +10.5=42K ≤ 50K) → keep
-    # 4: 42K (kept=4, +10.5=52.5K > 50K) → break before kept=4 actually
-    #    Wait: the check is "if kept and len(kept) >= min_hits and total + c > budget"
-    #    Before iter 4: kept has 3, total=31.5K. c=10.5K. 31.5+10.5=42K, ≤50K, no break, kept=4.
-    # 5: kept=4, total=42K. c=10.5K. 42+10.5=52.5K > 50K. Break BEFORE adding.
-    # Wait — break is checked BEFORE append. So at iter 4 we have kept=3, total=31.5K.
-    #    The break check fires when kept ≥ min_hits AND total + c > budget.
-    #    iter 4: kept=3 ≥ 3, 31.5+10.5=42 ≤ 50, no break, append → kept=4 total=42.
-    #    iter 5: kept=4 ≥ 3, 42+10.5=52.5 > 50, BREAK.
-    # → 4 hits.
+    out = trim_to_context_budget(hits, "single-session-user", budget_chars=50000)
     assert len(out) == 4, f"expected 4 hits at 10.5k each, got {len(out)}"
 
 
@@ -1102,15 +1091,10 @@ def test_trim_to_context_budget_handles_missing_score_field():
     assert len(out) == 2  # both fit
 
 
-def test_trim_appears_in_run_one_question_row(monkeypatch):
-    """run_one_question records n_hits_pre_trim and trims at SS budget."""
+def test_n_hits_pre_trim_recorded_when_budget_disabled(monkeypatch):
+    """With CONTEXT_BUDGET_CHARS empty, trim is a no-op so pre/post hit counts match."""
     from scripts import run_longmemeval as adapter
 
-    # Ten 10K-char hits → 100K total. SS budget=50K, min_hits=3.
-    # After iter 1..4 cumulative is 10K, 20K, 30K, 40K (≤50K, all kept).
-    # iter 5: total=40K, c=10K, 40K+10K=50K > 50K is False — kept.
-    # iter 6: total=50K, c=10K, 50K+10K=60K > 50K is True, kept≥3 — break.
-    # → 5 hits.
     fake_hits = [
         {"uuid": f"lme_q_qX__{i:03d}_x", "content": "x" * 10000,
          "score": 1.0 - i * 0.01,
@@ -1132,7 +1116,7 @@ def test_trim_appears_in_run_one_question_row(monkeypatch):
         oracle_category="single-session-user",
     )
     assert row["n_hits_pre_trim"] == 10
-    assert row["n_hits_used"] == 5
+    assert row["n_hits_used"] == 10  # no trim with empty budget dict
 
 
 def test_run_one_question_oracle_category_survives_generation_crash(monkeypatch):
