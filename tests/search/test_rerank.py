@@ -186,3 +186,38 @@ def test_rerank_uses_compiled_truth_for_page_records(fake_model):
     _, docs = fake_model.calls[0]
     assert "alpha bravo" in docs[0]
     assert "alpha bravo charlie delta" in docs[1]
+
+
+def test_rerank_caps_candidates_to_default_30(fake_model):
+    """Default cap is 30 — extras stay in input order at the tail."""
+    candidates = [{"uuid": f"ep-{i}", "content": f"doc {i} alpha"} for i in range(50)]
+    out = rerank("alpha", candidates, candidate_cap=None)
+    # Exactly 30 docs went to the model.
+    assert len(fake_model.calls) == 1
+    _, docs = fake_model.calls[0]
+    assert len(docs) == 30
+    # All 50 returned, with the last 20 carrying their RRF order at the tail.
+    assert len(out) == 50
+    tail_uuids = [c["uuid"] for c in out[-20:]]
+    assert tail_uuids == [f"ep-{i}" for i in range(30, 50)]
+    # Tail items have NO rerank_score (they weren't scored).
+    for c in out[-20:]:
+        assert "rerank_score" not in c
+
+
+def test_rerank_explicit_cap_override(fake_model):
+    """``candidate_cap`` parameter overrides the default."""
+    candidates = [{"uuid": f"ep-{i}", "content": f"doc {i} alpha"} for i in range(20)]
+    rerank("alpha", candidates, candidate_cap=5)
+    _, docs = fake_model.calls[0]
+    assert len(docs) == 5
+
+
+def test_rerank_truncates_long_docs_before_send(fake_model):
+    """Inputs over 1500 chars are truncated to bound MPS / CUDA memory."""
+    long_content = "alpha " * 1000  # 6000 chars
+    candidates = [{"uuid": "ep-long", "content": long_content}]
+    rerank("alpha", candidates)
+    _, docs = fake_model.calls[0]
+    assert len(docs) == 1
+    assert len(docs[0]) <= 1500

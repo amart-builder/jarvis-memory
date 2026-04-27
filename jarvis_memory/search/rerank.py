@@ -120,11 +120,22 @@ def _extract_text(record: dict[str, Any]) -> str:
     return ""
 
 
+_DEFAULT_RERANK_CAP: int = 30
+# Truncate doc text to this char count before sending to the cross-encoder.
+# BGE-rerankers max out at 512 tokens (~2000 chars) and the relevance
+# signal is concentrated near the head of the document. Keeping inputs
+# bounded prevents MPS / CUDA buffer-allocation blowups on long
+# session-sized documents (5000-10000 chars are common in conversation
+# memory). 1500 chars ≈ 375 tokens — well under the model's limit.
+_DEFAULT_RERANK_DOC_CHARS: int = 1500
+
+
 def rerank(
     query: str,
     candidates: list[dict[str, Any]],
     *,
     model_name: Optional[str] = None,
+    candidate_cap: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Re-rank ``candidates`` by cross-encoder relevance to ``query``.
 
@@ -136,6 +147,12 @@ def rerank(
             ``fact``) — empty texts get zero rerank score.
         model_name: Override the default model. Falls back to
             ``JARVIS_RERANK_MODEL`` env var, then ``DEFAULT_MODEL``.
+        candidate_cap: Maximum number of candidates to send to the
+            cross-encoder in one ``rank()`` call. Defaults to 50 — large
+            enough for any typical retrieval depth, small enough to
+            avoid MPS/CUDA buffer-allocation blowups with BGE-rerankers
+            on long documents. Excess candidates retain their incoming
+            RRF order at the tail of the result.
 
     Returns:
         The same dicts, each augmented with ``rerank_score: float``,
@@ -156,8 +173,12 @@ def rerank(
     if model is None:
         return candidates
 
-    docs: list[str] = [_extract_text(c) for c in candidates]
-    doc_ids: list[int] = list(range(len(candidates)))
+    cap = candidate_cap if candidate_cap is not None else _DEFAULT_RERANK_CAP
+    head = candidates[:cap]
+    tail = candidates[cap:]  # preserve RRF order for anything beyond the cap
+
+    docs: list[str] = [_extract_text(c)[:_DEFAULT_RERANK_DOC_CHARS] for c in head]
+    doc_ids: list[int] = list(range(len(head)))
 
     try:
         ranked = model.rank(query=query, docs=docs, doc_ids=doc_ids)
@@ -183,12 +204,15 @@ def rerank(
         score_by_idx[int(idx)] = score
 
     out: list[dict[str, Any]] = []
-    for i, c in enumerate(candidates):
+    for i, c in enumerate(head):
         new_c = dict(c)
         new_c["rerank_score"] = score_by_idx.get(i, 0.0)
         out.append(new_c)
 
     out.sort(key=lambda c: c["rerank_score"], reverse=True)
+    # Append uncapped tail items unchanged — they keep their RRF order
+    # and don't appear in the rerank top-K.
+    out.extend(tail)
     return out
 
 
