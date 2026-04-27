@@ -230,6 +230,7 @@ def scored_search(
     hall: Optional[str] = None,
     memory_type: Optional[str] = None,
     as_of: Optional[str] = None,
+    seen_as_of: Optional[str] = None,
     limit: int = 10,
     driver=None,
     embedding_store=None,
@@ -252,8 +253,14 @@ def scored_search(
         room: Topic filter.
         hall: Category filter.
         memory_type: Specific memory type filter.
-        as_of: ISO date — temporal validity filter via
-            :func:`jarvis_memory.temporal.filter_by_date`.
+        as_of: ISO date — *event-time* validity filter via
+            :func:`jarvis_memory.temporal.filter_by_date`. Answers
+            "what was true in the world on date X?"
+        seen_as_of: ISO date — *ingestion-time* validity filter via
+            :func:`jarvis_memory.temporal.filter_by_seen_as_of`. Answers
+            "what did we believe on date X?" Composes with ``as_of`` —
+            pass both to ask "what did we believe on date X about the
+            world on date Y?"
         limit: Maximum results.
         driver: Neo4j driver. When None, the function tries the Chroma
             channel only (keyword_search requires a driver).
@@ -291,6 +298,7 @@ def scored_search(
             hall=hall,
             memory_type=memory_type,
             as_of=as_of,
+            seen_as_of=seen_as_of,
             limit=limit,
             driver=driver,
             embedding_store=embedding_store,
@@ -388,6 +396,7 @@ def scored_search(
             hall=hall,
             memory_type=memory_type,
             as_of=as_of,
+            seen_as_of=seen_as_of,
             limit=limit,
             driver=driver,
             embedding_store=embedding_store,
@@ -425,6 +434,7 @@ def scored_search(
         hall=hall,
         memory_type=memory_type,
         as_of=as_of,
+        seen_as_of=seen_as_of,
     )
 
     # ── Cross-encoder rerank (env-gated, fail-open) ────────────────────
@@ -624,8 +634,15 @@ def _apply_filters(
     hall: Optional[str],
     memory_type: Optional[str],
     as_of: Optional[str],
+    seen_as_of: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Apply the five REST-level filters with legacy-compatible semantics."""
+    """Apply the REST-level filters with legacy-compatible semantics.
+
+    ``as_of`` and ``seen_as_of`` are independent. ``as_of`` is event time
+    (was the world like this on date X?); ``seen_as_of`` is ingestion
+    time (did we believe this on date X?). Pass either, both, or
+    neither. See :func:`jarvis_memory.temporal.filter_by_seen_as_of`.
+    """
     out = records
     if group_id:
         out = [r for r in out if r.get("group_id") == group_id or r.get("wing") == group_id]
@@ -647,6 +664,13 @@ def _apply_filters(
             out = filter_by_date(out, as_of=as_of)
         except Exception as e:  # noqa: BLE001
             logger.debug("filter_by_date failed (%s); skipping temporal filter", e)
+    if seen_as_of:
+        try:
+            from .temporal import filter_by_seen_as_of
+
+            out = filter_by_seen_as_of(out, seen_as_of=seen_as_of)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("filter_by_seen_as_of failed (%s); skipping ingestion filter", e)
     return out
 
 
@@ -658,6 +682,7 @@ def _legacy_scored_search(
     hall: Optional[str],
     memory_type: Optional[str],
     as_of: Optional[str],
+    seen_as_of: Optional[str] = None,
     limit: int,
     driver,
     embedding_store,
@@ -706,6 +731,13 @@ def _legacy_scored_search(
     if as_of:
         try:
             results = filter_by_date(results, as_of=as_of)
+        except Exception:
+            pass
+    if seen_as_of:
+        try:
+            from .temporal import filter_by_seen_as_of
+
+            results = filter_by_seen_as_of(results, seen_as_of=seen_as_of)
         except Exception:
             pass
     if group_id:

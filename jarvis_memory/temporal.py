@@ -156,7 +156,11 @@ def filter_by_date(
     results: list[dict[str, Any]],
     as_of: str,
 ) -> list[dict[str, Any]]:
-    """Filter a result set to facts valid at a specific date.
+    """Filter a result set to facts valid at a specific date (event time).
+
+    "What was true in the world on date X?" — filters against
+    ``valid_from`` / ``valid_to`` (event-time window). For ingestion
+    time ("what did we believe on date X?") use :func:`filter_by_seen_as_of`.
 
     Args:
         results: List of result dicts (must have valid_from/valid_to keys
@@ -166,35 +170,101 @@ def filter_by_date(
     Returns:
         Filtered list containing only facts valid at the given date.
     """
+    return _filter_by_window(
+        results,
+        target_iso=as_of,
+        start_keys=("valid_from", "created_at"),
+        end_keys=("valid_to",),
+        param_name="as_of",
+    )
+
+
+def filter_by_seen_as_of(
+    results: list[dict[str, Any]],
+    seen_as_of: str,
+) -> list[dict[str, Any]]:
+    """Filter a result set to facts the system *believed* at a specific date.
+
+    Bi-temporal counterpart to :func:`filter_by_date`. Where
+    ``filter_by_date`` answers "what was true in the world?",
+    this answers "what did we *think* was true at ingestion-time X?"
+    Filters against ``t_created`` / ``t_expired`` (ingestion-time
+    window). The two filters compose freely — pass both to ask
+    "what did we believe on date X about the world on date Y?"
+
+    Falls back to ``created_at`` when ``t_created`` is missing — keeps
+    legacy data (pre-A3.1 migration) participating in the filter even
+    if the migration hasn't run yet.
+
+    Args:
+        results: List of result dicts.
+        seen_as_of: ISO date string — ingestion-time anchor.
+
+    Returns:
+        Filtered list of facts the system trusted at that point in time.
+    """
+    return _filter_by_window(
+        results,
+        target_iso=seen_as_of,
+        start_keys=("t_created", "created_at"),
+        end_keys=("t_expired",),
+        param_name="seen_as_of",
+    )
+
+
+def _filter_by_window(
+    results: list[dict[str, Any]],
+    *,
+    target_iso: str,
+    start_keys: tuple[str, ...],
+    end_keys: tuple[str, ...],
+    param_name: str,
+) -> list[dict[str, Any]]:
+    """Generic temporal-window filter.
+
+    Used by both event-time (:func:`filter_by_date`) and ingestion-time
+    (:func:`filter_by_seen_as_of`) filtering. Same logic, different
+    field names — kept as one helper so any tweak to the windowing
+    semantics applies to both axes.
+    """
     try:
-        target = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        target = datetime.fromisoformat(target_iso.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
-        logger.warning(f"Invalid as_of date: {as_of}, returning unfiltered")
+        logger.warning(f"Invalid {param_name} date: {target_iso}, returning unfiltered")
         return results
 
     filtered = []
     for r in results:
-        # Try to get validity bounds from various locations
-        vf = r.get("valid_from") or r.get("created_at")
-        vt = r.get("valid_to")
+        # First non-null among start_keys; the second key is a fallback.
+        start: Any = None
+        for k in start_keys:
+            v = r.get(k)
+            if v is not None:
+                start = v
+                break
 
-        # Parse valid_from
-        if vf:
-            try:
-                vf_dt = datetime.fromisoformat(str(vf).replace("Z", "+00:00"))
-                if vf_dt > target:
-                    continue  # Fact didn't exist yet
-            except (ValueError, TypeError):
-                pass  # Can't parse, include by default
+        end: Any = None
+        for k in end_keys:
+            v = r.get(k)
+            if v is not None:
+                end = v
+                break
 
-        # Parse valid_to
-        if vt:
+        if start:
             try:
-                vt_dt = datetime.fromisoformat(str(vt).replace("Z", "+00:00"))
-                if vt_dt < target:
-                    continue  # Fact had already ended
+                start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+                if start_dt > target:
+                    continue  # window hadn't opened yet at target date
             except (ValueError, TypeError):
-                pass  # Can't parse, include by default
+                pass  # unparseable — fall through, include the record
+
+        if end:
+            try:
+                end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+                if end_dt < target:
+                    continue  # window had already closed at target date
+            except (ValueError, TypeError):
+                pass  # unparseable — include
 
         filtered.append(r)
 

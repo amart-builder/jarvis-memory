@@ -225,7 +225,11 @@ class ScoredSearchRequest(BaseModel):
     group_id: Optional[str] = None
     room: Optional[str] = None
     hall: Optional[str] = None
+    # ``as_of`` = event-time anchor ("what was true on date X?").
+    # ``seen_as_of`` = ingestion-time anchor ("what did we believe on date X?").
+    # Independent; pass either, both, or neither.
     as_of: Optional[str] = None
+    seen_as_of: Optional[str] = None
     limit: int = 10
     memory_type: Optional[str] = None
 
@@ -582,6 +586,7 @@ async def scored_search(req: ScoredSearchRequest):
             hall=req.hall,
             memory_type=req.memory_type,
             as_of=req.as_of,
+            seen_as_of=req.seen_as_of,
             limit=req.limit,
             driver=driver,
             embedding_store=store,
@@ -604,6 +609,7 @@ async def scored_search(req: ScoredSearchRequest):
                 "room": req.room,
                 "hall": req.hall,
                 "as_of": req.as_of,
+                "seen_as_of": req.seen_as_of,
             },
         }
     except HTTPException:
