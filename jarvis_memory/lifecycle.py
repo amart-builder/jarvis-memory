@@ -42,6 +42,19 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 # Default status for new memories
 DEFAULT_STATUS = "active"
 
+# Lifecycle transitions that close the bi-temporal ingestion window.
+# When a memory enters one of these states, we record:
+#   * ``t_expired = datetime()``  — we stopped believing it now (ingestion-time end)
+#   * ``valid_to  = coalesce(n.valid_to, datetime())`` — and if event-time
+#     end isn't already pinned, that's now too. Coalesce is critical:
+#     a prior set_validity() call may have established a real-world
+#     end date earlier than the contradiction (e.g. "Max left Orion in
+#     February, but we're only learning now"). Don't overwrite that.
+#
+# Soft transitions (outdated, archived) deliberately do *not* expire —
+# the memory might still be true, just not actively useful.
+EXPIRING_STATES: frozenset[str] = frozenset({"contradicted", "superseded", "deleted"})
+
 
 class MemoryLifecycle:
     """Memory lifecycle management with status tracking and transitions.
@@ -96,17 +109,35 @@ class MemoryLifecycle:
             logger.warning(f"Invalid transition: {from_status} -> {to_status}")
             return False
 
+        # When this transition expires the memory (contradicted /
+        # superseded / deleted), close both bi-temporal windows in the
+        # same atomic write. Soft states leave the windows open.
+        expires = to_status in EXPIRING_STATES
+
         try:
             with self._driver.session() as session:
-                result = session.run(
+                if expires:
+                    cypher = """
+                        MATCH (n)
+                        WHERE n.uuid = $uuid AND coalesce(n.lifecycle_status, 'active') = $from_status
+                        SET n.lifecycle_status = $to_status,
+                            n.lifecycle_updated_at = datetime(),
+                            n.lifecycle_metadata = $metadata,
+                            n.t_expired = coalesce(n.t_expired, datetime()),
+                            n.valid_to = coalesce(n.valid_to, datetime())
+                        RETURN n.uuid AS uuid
                     """
-                    MATCH (n)
-                    WHERE n.uuid = $uuid AND coalesce(n.lifecycle_status, 'active') = $from_status
-                    SET n.lifecycle_status = $to_status,
-                        n.lifecycle_updated_at = datetime(),
-                        n.lifecycle_metadata = $metadata
-                    RETURN n.uuid AS uuid
-                    """,
+                else:
+                    cypher = """
+                        MATCH (n)
+                        WHERE n.uuid = $uuid AND coalesce(n.lifecycle_status, 'active') = $from_status
+                        SET n.lifecycle_status = $to_status,
+                            n.lifecycle_updated_at = datetime(),
+                            n.lifecycle_metadata = $metadata
+                        RETURN n.uuid AS uuid
+                    """
+                result = session.run(
+                    cypher,
                     uuid=memory_id,
                     from_status=from_status,
                     to_status=to_status,
