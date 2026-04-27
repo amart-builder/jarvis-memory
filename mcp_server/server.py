@@ -148,7 +148,24 @@ JARVIS_TOOLS = [
                 "group_id": {"type": "string", "description": "Project group (wing) to search within"},
                 "room": {"type": "string", "description": "Topic filter (e.g., 'auth', 'frontend', 'infrastructure')"},
                 "hall": {"type": "string", "description": "Memory category filter: decisions, plans, milestones, problems, context"},
-                "as_of": {"type": "string", "description": "ISO date — only return facts valid at this date (temporal filter)"},
+                "as_of": {
+                    "type": "string",
+                    "description": (
+                        "Event-time anchor. ISO date — only return facts whose "
+                        "valid_from..valid_to window covers this date. Answers "
+                        "'what was true on date X?'"
+                    ),
+                },
+                "seen_as_of": {
+                    "type": "string",
+                    "description": (
+                        "Ingestion-time anchor. ISO date — only return facts the "
+                        "system believed at this date (t_created..t_expired window). "
+                        "Answers 'what did we believe on date X?' Composes with "
+                        "as_of: pass both for 'what did we believe on date X about "
+                        "the world on date Y?'"
+                    ),
+                },
                 "limit": {"type": "integer", "description": "Max results (default 10)", "default": 10},
                 "memory_type": {"type": "string", "description": "Filter by specific memory type (optional)"},
             },
@@ -689,6 +706,7 @@ async def _dispatch(
         room = args.get("room")
         hall = args.get("hall")
         as_of = args.get("as_of")
+        seen_as_of = args.get("seen_as_of")
         limit = args.get("limit", 10)
         memory_type = args.get("memory_type")
 
@@ -755,9 +773,16 @@ async def _dispatch(
                         r["semantic_similarity"] = sim
                         scored.append(r)
 
-                    # Apply temporal filter if requested
+                    # Apply temporal filters: ``as_of`` is event time
+                    # (was the world like this?); ``seen_as_of`` is
+                    # ingestion time (did we believe this?). Both
+                    # compose — pass either, both, or neither.
                     if as_of:
                         scored = filter_by_date(scored, as_of)
+                    if seen_as_of:
+                        from jarvis_memory.temporal import filter_by_seen_as_of
+
+                        scored = filter_by_seen_as_of(scored, seen_as_of)
 
                     scored.sort(key=lambda x: x["composite_score"], reverse=True)
 
@@ -767,7 +792,12 @@ async def _dispatch(
                         "query": query,
                         "group_id": group_id,
                         "search_mode": "semantic",
-                        "filters": {"room": room, "hall": hall, "as_of": as_of},
+                        "filters": {
+                            "room": room,
+                            "hall": hall,
+                            "as_of": as_of,
+                            "seen_as_of": seen_as_of,
+                        },
                     }
             except Exception as e:
                 logger.warning(f"ChromaDB search failed, falling back to text: {e}")
@@ -829,6 +859,10 @@ async def _dispatch(
 
             if as_of:
                 scored = filter_by_date(scored, as_of)
+            if seen_as_of:
+                from jarvis_memory.temporal import filter_by_seen_as_of
+
+                scored = filter_by_seen_as_of(scored, seen_as_of)
 
             scored.sort(key=lambda x: x["composite_score"], reverse=True)
 
