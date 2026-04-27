@@ -30,10 +30,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import time
 import traceback
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -66,7 +68,18 @@ LME_CHROMA_COLLECTION: str = "jarvis_lme_v1"
 LME_AGENT_ID: str = "benchmark-longmemeval"
 
 DEFAULT_DATASET: Path = Path("data/longmemeval/longmemeval_s_cleaned.json")
+DEFAULT_ORACLE: Path = Path("data/longmemeval/longmemeval_oracle.json")
 DEFAULT_OUTPUT: Path = Path("runs/lme_run.jsonl")
+
+# Stage 0: deterministic seeding constant. Used for OpenAI ``seed=`` arg
+# (gpt-4o + gpt-4.1 honor it for reproducible decoding at temperature=0)
+# AND as Python's random seed at module load. PYTHONHASHSEED is enforced
+# by re-exec'ing in main() if the env var isn't already 42.
+RUN_SEED: int = 42
+
+# Apply Python random seed at import time so any downstream module that
+# samples on import (e.g. embedding init) sees a deterministic state.
+random.seed(RUN_SEED)
 
 # Stoplist for AR2 (PPR seed broadening). Common English words that
 # should NOT seed a graph walk — they appear too often.
@@ -133,6 +146,93 @@ def apply_ppr_overrides() -> None:
 
     ppr_mod._extract_query_entities = broadened_extract
     ppr_mod.personalized_pagerank = ppr_with_alpha
+
+
+# ── Stage 0: gold-session retrieval diagnostics ───────────────────────
+
+
+def _extract_session_id(uuid: str, group_id: str) -> str:
+    """Recover the bare LongMemEval session_id from our UUID format.
+
+    Ingestion writes UUIDs as ``f"{group_id}__{i:03d}_{session_id}"``
+    (the ``i:03d`` was added in commit f9aa28c to handle 13/500 questions
+    in s_cleaned where the same session_id appears twice in
+    haystack_session_ids — Chroma rejects duplicate IDs in one batch).
+
+    LongMemEval session_ids themselves can contain underscores
+    (e.g. ``answer_4be1b6b4_2``) so we can't naively split on ``_``.
+    Strip the known prefix shape, then strip exactly the 3-digit index
+    that follows.
+    """
+    prefix = f"{group_id}__"
+    if not uuid.startswith(prefix):
+        return uuid
+    rest = uuid[len(prefix):]
+    if len(rest) >= 4 and rest[:3].isdigit() and rest[3] == "_":
+        return rest[4:]
+    return rest
+
+
+def compute_retrieval_diagnostics(
+    hits: list[dict[str, Any]],
+    answer_session_ids: list[str],
+    group_id: str,
+) -> dict[str, Any]:
+    """Compute gold-session retrieval diagnostics for one question.
+
+    Stage 0 instrumentation. Tracks where each oracle ``answer_session_id``
+    ranks in the final hit list that gets fed to the LLM. Diagnostics are
+    purely observational — they are NOT used to alter generation.
+
+    The returned dict is logged verbatim into the JSONL row so per-stage
+    runs can be diff'd to see which interventions improved retrieval vs
+    which improved generation.
+
+    Args:
+        hits: Final hit list (post-filter, post-sort, post-recency-boost)
+            sent into the prompt. Order matters — rank 1 = top.
+        answer_session_ids: Oracle's ground-truth session IDs for this Q.
+        group_id: Per-question namespace prefix used in UUIDs.
+
+    Returns:
+        Dict with:
+          - ``gold_session_ids``: sorted oracle IDs (for the row)
+          - ``gold_count``: how many gold sessions exist
+          - ``gold_ranks``: {session_id: 1-based rank, or -1 if missing}
+          - ``gold_in_top{5,10,20,50}``: count of gold IDs at-or-above rank K
+          - ``gold_in_pool``: count of gold IDs anywhere in the hit list
+          - ``all_gold_in_top5``: every gold ID is ranked ≤5
+          - ``any_gold_in_top5``: at least one gold ID is ranked ≤5
+          - ``candidate_pool_size``: ``len(hits)``
+    """
+    gold_set = set(answer_session_ids)
+    gold_count = len(gold_set)
+    ranks: dict[str, int] = {sid: -1 for sid in gold_set}
+
+    for rank, h in enumerate(hits, start=1):
+        uid = str(h.get("uuid") or h.get("id") or "")
+        sid = _extract_session_id(uid, group_id)
+        if sid in gold_set and ranks[sid] == -1:
+            ranks[sid] = rank
+
+    found_ranks = [r for r in ranks.values() if r > 0]
+
+    def _at_or_below(k: int) -> int:
+        return sum(1 for r in found_ranks if r <= k)
+
+    return {
+        "gold_session_ids": sorted(gold_set),
+        "gold_count": gold_count,
+        "gold_ranks": ranks,
+        "gold_in_top5": _at_or_below(5),
+        "gold_in_top10": _at_or_below(10),
+        "gold_in_top20": _at_or_below(20),
+        "gold_in_top50": _at_or_below(50),
+        "gold_in_pool": len(found_ranks),
+        "all_gold_in_top5": gold_count > 0 and all(0 < r <= 5 for r in ranks.values()),
+        "any_gold_in_top5": any(0 < r <= 5 for r in ranks.values()),
+        "candidate_pool_size": len(hits),
+    }
 
 
 # ── Resume / output handling ──────────────────────────────────────────
@@ -445,10 +545,14 @@ def call_llm(*, answerer: str, prompt: str, max_tokens: int) -> str:
             raise RuntimeError("openai SDK not installed; pip install openai")
         client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
         model = _GPT4O_MODEL if answerer == "gpt4o" else _GPT41_MODEL
+        # Stage 0: pass ``seed=`` for reproducibility. OpenAI honors this on
+        # gpt-4o + gpt-4.1 — combined with temperature=0 it shaves run-to-run
+        # noise so we can tell signal from variance when iterating.
         resp = client.chat.completions.create(
             model=model,
             max_tokens=max_tokens,
             temperature=0,
+            seed=RUN_SEED,
             messages=[{"role": "user", "content": prompt}],
         )
         return (resp.choices[0].message.content or "").strip()
@@ -466,27 +570,47 @@ def run_one_question(
     driver: Any,
     embedding_store: Any,
     chroma_collection: Any,
+    oracle_answer_session_ids: Optional[list[str]] = None,
 ) -> dict:
     """Execute the full pipeline for a single LongMemEval question.
 
     Returns the JSONL row to write. On crash, returns a row with
     ``hypothesis=""`` and ``error=<traceback>`` so the run continues.
+
+    When ``oracle_answer_session_ids`` is provided (Stage 0 diagnostics
+    mode), retrieval-quality stats are computed from ``hits`` BEFORE
+    generation and attached to the row under ``"diagnostics"``. The
+    oracle data does NOT alter the prompt or generation in any way —
+    it's purely observational.
     """
     qid = q["question_id"]
-    question = q["question"]
-    raw_qdate = q.get("question_date", "")
-    qdate = parse_longmemeval_date(raw_qdate) if raw_qdate else ""
-
-    group_id = f"lme_q_{qid}"
-    classification = classify(question)
-    category = classification.label
-    counting = is_counting_question(question)
-
-    cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
-    max_tokens = int(cfg["max_tokens"])
+    # Defensive defaults so the error row in the except block always
+    # carries readable category info even if setup raises before the
+    # classifier runs.
+    category = "unknown"
+    classifier_rule = ""
+    counting = False
+    diagnostics: Optional[dict] = None
+    n_sessions = 0
+    hits: list[dict[str, Any]] = []
+    top_score = 0.0
+    max_tokens = 1024
 
     t0 = time.time()
     try:
+        question = q["question"]
+        raw_qdate = q.get("question_date", "")
+        qdate = parse_longmemeval_date(raw_qdate) if raw_qdate else ""
+
+        group_id = f"lme_q_{qid}"
+        classification = classify(question)
+        category = classification.label
+        classifier_rule = classification.rule
+        counting = is_counting_question(question)
+
+        cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
+        max_tokens = int(cfg["max_tokens"])
+
         # 1. Ingest haystack into isolated namespace.
         n_sessions = ingest_question_haystack(
             driver=driver,
@@ -521,6 +645,19 @@ def run_one_question(
         else:
             top_score = 0.0
 
+        # 3.5. (Optional) gold-session retrieval diagnostics — Stage 0.
+        # Computed on the final hits list (what enters the prompt) so we
+        # answer "did the LLM see the gold session?" cleanly. Pure
+        # observation; never feeds into prompt or generation. Computed
+        # BEFORE generation so a generation crash still preserves the
+        # retrieval signal in the error row.
+        if oracle_answer_session_ids is not None:
+            diagnostics = compute_retrieval_diagnostics(
+                hits=hits,
+                answer_session_ids=oracle_answer_session_ids,
+                group_id=group_id,
+            )
+
         # 4. Format prompt.
         sessions_text = "\n\n".join(
             format_session_for_prompt(
@@ -545,29 +682,43 @@ def run_one_question(
         )
 
         elapsed = time.time() - t0
-        return {
+        row = {
             "question_id": qid,
             "hypothesis": hypothesis,
             "predicted_category": category,
-            "classifier_rule": classification.rule,
+            "classifier_rule": classifier_rule,
             "counting": counting,
             "n_sessions_ingested": n_sessions,
             "n_hits_used": len(hits),
             "top_score": round(top_score, 4),
             "max_tokens": max_tokens,
             "answerer": answerer,
+            # Stage 0: ``seed`` arg is honored only for OpenAI answerers
+            # (gpt4o, gpt41). Anthropic Messages API has no seed param so
+            # opus runs are NOT bit-reproducible (temperature=0 only).
+            "seed_honored": answerer in ("gpt4o", "gpt41"),
             "elapsed_sec": round(elapsed, 2),
         }
+        if diagnostics is not None:
+            row["diagnostics"] = diagnostics
+        return row
     except Exception:
         elapsed = time.time() - t0
-        return {
+        err_row: dict[str, Any] = {
             "question_id": qid,
             "hypothesis": "",
             "predicted_category": category,
+            "classifier_rule": classifier_rule,
+            "counting": counting,
             "answerer": answerer,
+            "seed_honored": answerer in ("gpt4o", "gpt41"),
             "elapsed_sec": round(elapsed, 2),
             "error": traceback.format_exc(),
         }
+        # Preserve retrieval-quality signal even when generation crashes.
+        if diagnostics is not None:
+            err_row["diagnostics"] = diagnostics
+        return err_row
 
 
 # ── Setup ─────────────────────────────────────────────────────────────
@@ -606,6 +757,122 @@ def setup_resources():
     return driver, embedding_store, collection
 
 
+def write_run_summary(output_path: Path) -> Path:
+    """Read the JSONL output and write a ``<output>_summary.json`` file.
+
+    Stage 0 reporting. Aggregates per-category processed/errored counts
+    and (when diagnostics rows are present) gold-session retrieval stats
+    so we can compare runs without re-parsing 500 lines by hand. Judge
+    scoring is NOT in this summary — it runs separately and produces
+    its own ``.eval-results-*`` file.
+    """
+    if not output_path.exists():
+        raise FileNotFoundError(f"output JSONL missing: {output_path}")
+
+    n_total = 0
+    n_errored = 0
+    cat_total: Counter[str] = Counter()
+    cat_errored: Counter[str] = Counter()
+    elapsed_total = 0.0
+    answerer_seen: set[str] = set()
+
+    diag_n = 0
+    diag_n_abstention = 0  # rows whose oracle has no answer_session_ids
+    diag_all_top5 = 0
+    diag_any_top5 = 0
+    diag_any_top10 = 0
+    diag_any_pool = 0
+    diag_by_cat: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"n": 0, "all_top5": 0, "any_top5": 0, "any_top10": 0, "any_pool": 0}
+    )
+
+    with output_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            n_total += 1
+            cat = row.get("predicted_category", "unknown")
+            cat_total[cat] += 1
+            if row.get("error"):
+                n_errored += 1
+                cat_errored[cat] += 1
+            elapsed_total += float(row.get("elapsed_sec") or 0.0)
+            ans = row.get("answerer")
+            if ans:
+                answerer_seen.add(ans)
+
+            d = row.get("diagnostics")
+            if isinstance(d, dict):
+                if (d.get("gold_count") or 0) <= 0:
+                    # Abstention question (oracle has no answer_session_ids)
+                    # — track separately so empty-gold rows don't dilute the
+                    # retrieval-quality aggregates.
+                    diag_n_abstention += 1
+                    continue
+                diag_n += 1
+                if d.get("all_gold_in_top5"):
+                    diag_all_top5 += 1
+                if d.get("any_gold_in_top5"):
+                    diag_any_top5 += 1
+                if (d.get("gold_in_top10") or 0) > 0:
+                    diag_any_top10 += 1
+                if (d.get("gold_in_pool") or 0) > 0:
+                    diag_any_pool += 1
+
+                bucket = diag_by_cat[cat]
+                bucket["n"] += 1
+                if d.get("all_gold_in_top5"):
+                    bucket["all_top5"] += 1
+                if d.get("any_gold_in_top5"):
+                    bucket["any_top5"] += 1
+                if (d.get("gold_in_top10") or 0) > 0:
+                    bucket["any_top10"] += 1
+                if (d.get("gold_in_pool") or 0) > 0:
+                    bucket["any_pool"] += 1
+
+    def _pct(num: int, denom: int) -> Optional[float]:
+        return round(num / denom, 4) if denom > 0 else None
+
+    summary: dict[str, Any] = {
+        "output_path": str(output_path),
+        "answerer": sorted(answerer_seen),
+        "n_total": n_total,
+        "n_errored": n_errored,
+        "elapsed_sec_total": round(elapsed_total, 2),
+        "predicted_categories": dict(cat_total),
+        "errored_by_category": dict(cat_errored),
+    }
+    if diag_n > 0 or diag_n_abstention > 0:
+        summary["diagnostics"] = {
+            "n_questions": diag_n,
+            "n_abstention": diag_n_abstention,
+            "all_gold_in_top5_pct": _pct(diag_all_top5, diag_n),
+            "any_gold_in_top5_pct": _pct(diag_any_top5, diag_n),
+            "any_gold_in_top10_pct": _pct(diag_any_top10, diag_n),
+            "any_gold_in_pool_pct": _pct(diag_any_pool, diag_n),
+            "by_predicted_category": {
+                cat: {
+                    "n": v["n"],
+                    "all_top5_pct": _pct(v["all_top5"], v["n"]),
+                    "any_top5_pct": _pct(v["any_top5"], v["n"]),
+                    "any_top10_pct": _pct(v["any_top10"], v["n"]),
+                    "any_pool_pct": _pct(v["any_pool"], v["n"]),
+                }
+                for cat, v in diag_by_cat.items()
+            },
+        }
+
+    # ``runs/foo.jsonl`` → ``runs/foo.summary.json``.
+    summary_path = output_path.parent / f"{output_path.stem}.summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    return summary_path
+
+
 def stratified_subset(dataset: list[dict], n_per_cat: int = 2) -> list[dict]:
     """Pick a stratified validation subset across all 6 categories."""
     by_cat: dict[str, list[dict]] = {}
@@ -625,11 +892,29 @@ def stratified_subset(dataset: list[dict], n_per_cat: int = 2) -> list[dict]:
 
 
 def main():
+    # Stage 0: re-exec with PYTHONHASHSEED=42 if it isn't already set so
+    # set/dict iteration order is deterministic across runs. Re-exec is
+    # the only way — once Python is up, hash randomization is locked.
+    # Skip when running under pytest (PYTEST_CURRENT_TEST is the canonical
+    # marker pytest sets per-test); re-execing the test runner would be a
+    # surprising side effect.
+    running_under_pytest = "PYTEST_CURRENT_TEST" in os.environ
+    if not running_under_pytest and os.environ.get("PYTHONHASHSEED") != str(RUN_SEED):
+        os.environ["PYTHONHASHSEED"] = str(RUN_SEED)
+        os.execvp(sys.executable, [sys.executable] + sys.argv)
+        return 0  # unreachable; execvp replaces the process
+
     parser = argparse.ArgumentParser(description="LongMemEval adapter for jarvis-memory v1.1")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
                         help="Output JSONL path (resume-safe).")
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET,
                         help="Path to longmemeval_s_cleaned.json (or oracle for diagnostics).")
+    parser.add_argument("--oracle-path", type=Path, default=DEFAULT_ORACLE,
+                        help="Path to longmemeval_oracle.json. Read only when --diagnostics is set.")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="Stage 0: load oracle answer_session_ids and log retrieval-quality "
+                             "diagnostics per question. Pure observation — does NOT alter prompts "
+                             "or generation. Adds ~0 cost.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Stop after this many NEW questions (after resume).")
     parser.add_argument("--validate", action="store_true",
@@ -657,6 +942,23 @@ def main():
     with args.dataset.open() as f:
         dataset = json.load(f)
     print(f"  Loaded {len(dataset)} questions")
+
+    # Stage 0: optional oracle diagnostics. Loaded once, indexed by qid.
+    oracle_by_qid: dict[str, list[str]] = {}
+    if args.diagnostics:
+        if not args.oracle_path.exists():
+            print(f"ERROR: --diagnostics set but oracle missing: {args.oracle_path}",
+                  file=sys.stderr)
+            return 2
+        print(f"Loading oracle for diagnostics: {args.oracle_path}")
+        with args.oracle_path.open() as f:
+            oracle = json.load(f)
+        for o in oracle:
+            qid = o.get("question_id")
+            sids = o.get("answer_session_ids") or []
+            if qid and sids:
+                oracle_by_qid[qid] = list(sids)
+        print(f"  Indexed {len(oracle_by_qid)} oracle answer-session lists")
 
     if args.question_id:
         dataset = [q for q in dataset if q["question_id"] == args.question_id]
@@ -697,6 +999,7 @@ def main():
                     driver=driver,
                     embedding_store=embedding_store,
                     chroma_collection=chroma_collection,
+                    oracle_answer_session_ids=oracle_by_qid.get(q["question_id"]),
                 )
                 out.write(json.dumps(row) + "\n")
                 out.flush()
@@ -715,6 +1018,14 @@ def main():
     elapsed = time.time() - start
     print(f"\nDone. {n_done} processed, {n_failed} failed, {elapsed:.0f}s total.")
     print(f"Output: {args.output}")
+
+    # Stage 0: write per-run summary alongside the JSONL.
+    try:
+        summary_path = write_run_summary(args.output)
+        print(f"Summary: {summary_path}")
+    except Exception as e:  # noqa: BLE001 — summary is best-effort
+        print(f"WARN: failed to write run summary: {e}", file=sys.stderr)
+
     return 0 if n_failed == 0 else 1
 
 
