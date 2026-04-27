@@ -129,7 +129,11 @@ def generate_layer1(
         else:
             content_map = {}
 
-        # Group by room
+        # Group by room. ``top_items`` is already sorted by score descending,
+        # so ``setdefault`` populates ``rooms`` in score-descending order: the
+        # first room encountered is the one with the highest-scored item.
+        # Python 3.7+ preserves dict insertion order, so iterating ``rooms``
+        # below yields rooms ordered by max-item-score, not alphabetically.
         rooms: dict[str, list[str]] = {}
         for item in top_items:
             room = item["room"]
@@ -145,7 +149,7 @@ def generate_layer1(
         lines = ["## Key Context (last 30 days)"]
         token_count = _estimate_tokens(lines[0])
 
-        for room, items in sorted(rooms.items()):
+        for room, items in rooms.items():
             room_header = f"\n**{room}:**"
             token_count += _estimate_tokens(room_header)
             if token_count > max_tokens:
