@@ -122,7 +122,7 @@ def test_k_floors_cover_all_six_categories():
     }
     assert set(K_FLOORS) == expected
     assert all(k >= 20 for k in K_FLOORS.values())
-    assert COUNTING_K_FLOOR == 45
+    assert COUNTING_K_FLOOR == 60  # Stage 2: bumped from 45 for wider MS recall
 
 
 def test_filter_config_keys_complete():

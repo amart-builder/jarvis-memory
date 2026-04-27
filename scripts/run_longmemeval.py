@@ -150,6 +150,58 @@ def apply_ppr_overrides() -> None:
     ppr_mod.personalized_pagerank = ppr_with_alpha
 
 
+# ── Stage 2: list-extraction post-processing for MS counting ──────────
+
+
+_LIST_ITEM_RE = re.compile(
+    r"^\s*(?:[-*•]|\d+[.)])\s+",  # "- foo", "* foo", "• foo", "1. foo", "1) foo"
+    re.MULTILINE,
+)
+_TOTAL_LINE_RE = re.compile(
+    r"(?im)^\s*(?:total|count|answer)\s*[:\-=]\s*(\d+)\b",
+)
+
+
+def maybe_append_total_line(hypothesis: str, category: str, counting: bool) -> str:
+    """Defensive: ensure MS counting answers end with 'Total: N'.
+
+    Stage 2 prompt rule says the FINAL line MUST be "Total: N". gpt-4.1
+    follows the rule most of the time but occasionally enumerates a list
+    and forgets the total line. When that happens, count list items and
+    append the total ourselves so the judge sees a clean number.
+
+    Only applies to ``multi-session`` category AND counting questions —
+    the rule is in the MS prompt and the judge looks for a number on
+    these questions specifically. Pure function — never mutates input.
+
+    Args:
+        hypothesis: Raw LLM output.
+        category: Predicted category. Skip unless multi-session.
+        counting: ``is_counting_question`` result. Skip unless True.
+
+    Returns:
+        Possibly-augmented hypothesis. If the answer already has a
+        "Total: N" line, returns input unchanged.
+    """
+    if category != "multi-session" or not counting:
+        return hypothesis
+    if not hypothesis or not hypothesis.strip():
+        return hypothesis
+
+    # Already has a total/count/answer-N line? Leave alone.
+    if _TOTAL_LINE_RE.search(hypothesis):
+        return hypothesis
+
+    # Count enumerated list items (bullet- or numbered-list lines).
+    items = _LIST_ITEM_RE.findall(hypothesis)
+    if len(items) < 2:
+        # Need at least 2 list items to be confident this is a count answer
+        # — single bullet might be incidental to a non-counting answer.
+        return hypothesis
+
+    return f"{hypothesis.rstrip()}\n\nTotal: {len(items)}"
+
+
 # ── Stage 1: confidence-based abstention guard ────────────────────────
 
 
@@ -771,6 +823,7 @@ def run_one_question(
     top_score = 0.0
     max_tokens = 1024
     abstention_fired = False
+    total_line_appended = False
 
     t0 = time.time()
     try:
@@ -883,6 +936,13 @@ def run_one_question(
             max_tokens=max_tokens,
         )
 
+        # 5.5. Stage 2: defensive total-line post-process for MS counting
+        # questions when the LLM forgot the "Total: N" final line. No-op
+        # for any other category or non-counting MS question.
+        hypothesis_pre_post = hypothesis
+        hypothesis = maybe_append_total_line(hypothesis, category, counting)
+        total_line_appended = hypothesis != hypothesis_pre_post
+
         elapsed = time.time() - t0
         row = {
             "question_id": qid,
@@ -897,6 +957,7 @@ def run_one_question(
             "n_hits_pre_trim": n_hits_pre_trim,
             "top_score": round(top_score, 4),
             "abstention_fired": abstention_fired,
+            "total_line_appended": total_line_appended,
             "max_tokens": max_tokens,
             "answerer": answerer,
             # Stage 0: ``seed`` arg is honored only for OpenAI answerers
@@ -926,6 +987,7 @@ def run_one_question(
             "n_hits_pre_trim": n_hits_pre_trim,
             "top_score": round(top_score, 4),
             "abstention_fired": abstention_fired,
+            "total_line_appended": total_line_appended,
             "max_tokens": max_tokens,
             "answerer": answerer,
             "seed_honored": answerer in ("gpt4o", "gpt41"),

@@ -265,8 +265,12 @@ K_FLOORS: dict[str, int] = {
 
 # K floor specifically for counting questions (subset of multi-session).
 # OMEGA bumps to 45 when "how many/much/often/total/count/number of"
-# appears (lines 1473-1480).
-COUNTING_K_FLOOR: int = 45
+# appears (lines 1473-1480). Stage 2 (2026-04-27): bumped 45 → 60. The
+# multi-session under-counting failure mode (35/74 wrongs) suggests we
+# need wider recall on counting questions — borderline matches the
+# enumeration prompt should grab. With our cross-encoder rerank in
+# place, more candidates ≈ free.
+COUNTING_K_FLOOR: int = 60
 
 
 def is_counting_question(question: str) -> bool:
@@ -280,7 +284,9 @@ FILTER_CONFIG: dict[str, dict[str, float | int]] = {
     "single-session-assistant":  {"min_rel": 0.15, "min_res": 2, "max_res": 10, "max_tokens": 512},
     "single-session-preference": {"min_rel": 0.12, "min_res": 3, "max_res": 10, "max_tokens": 2048},
     "knowledge-update":          {"min_rel": 0.15, "min_res": 3, "max_res": 15, "max_tokens": 2048},
-    "multi-session":             {"min_rel": 0.08, "min_res": 4, "max_res": 20, "max_tokens": 2048},
+    # Stage 2: dropped multi-session min_rel 0.08 → 0.05 to keep more
+    # borderline candidates for the enumeration-discipline prompt.
+    "multi-session":             {"min_rel": 0.05, "min_res": 4, "max_res": 20, "max_tokens": 2048},
     "temporal-reasoning":        {"min_rel": 0.10, "min_res": 5, "max_res": 20, "max_tokens": 2048},
 }
 

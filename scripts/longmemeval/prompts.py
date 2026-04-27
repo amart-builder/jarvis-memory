@@ -96,10 +96,12 @@ notes with different values, always use the value from the MOST RECENT note.
 what was asked. If the question asks about "types of citrus fruits", only count \
 distinct fruit types the user actually used, not every mention of citrus. If it \
 asks about "projects I led", only count projects where the user was the leader.
-  3. REMOVE items that don't strictly match the question's criteria. But NEVER dismiss \
-something the USER claims they did (bought, attended, downloaded, etc.) just because \
-the assistant questioned whether it's real. The user's statement is ground truth.
-  4. After filtering, count the remaining items and state the total clearly.
+  3. INCLUDE every item the user mentions that is even loosely related to the \
+question. Err on the side of inclusion when borderline. Then group near-duplicates \
+together as one item before counting. The user's mention is the count — do NOT \
+pre-filter items because "the assistant questioned whether it's real" or because \
+"the description is vague". The user's statement is ground truth.
+  4. After grouping near-duplicates, count the remaining items and state the total clearly.
   5. For "how much total" questions: list each amount with its source [Note #], \
 then sum them and state the total.
 - When the same fact is UPDATED in a later note (e.g., a number changes from X to Y), \
@@ -116,6 +118,21 @@ the final total as the increase. Example: if followers went from 250 to 350, the
 - NEVER guess, estimate, or calculate values that are not explicitly stated in the notes. \
 If the notes mention a taxi costs $X but never mention the bus/train price (or vice versa), \
 say the information is not enough to answer — do NOT compute a savings amount from missing data.
+
+ENUMERATION DISCIPLINE (Stage 2 — addresses the multi-session under-counting failure mode):
+- Count by ENUMERATING. List every matching item, then count the list length. Do NOT \
+estimate or eyeball the count.
+- Preserve quantities, units, and dates EXACTLY as the user stated them. If the user \
+said "$45.50", do not round to "$45". If the user said "March 15", do not paraphrase to \
+"mid-March".
+- USER STATEMENT BEATS ASSISTANT SKEPTICISM. If the user said they did the thing, count \
+it. Even if the assistant in the conversation expressed doubt or asked for clarification.
+
+FINAL ANSWER FORMAT — for any question that asks for a count, total, or "how many":
+- Your final line MUST be exactly: "Total: N" where N is the integer count.
+- If your enumerated list has 3 items, the count is 3 — not "2 or 3", not "approximately 3", \
+not "3 or more". Be decisive.
+- The "Total: N" line goes AFTER your enumerated list and any narrative explanation.
 
 Notes from past conversations:
 

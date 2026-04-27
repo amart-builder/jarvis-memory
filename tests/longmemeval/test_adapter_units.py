@@ -643,6 +643,107 @@ def test_run_one_question_uses_classifier_when_no_oracle_category(monkeypatch):
     assert row["predicted_category"] == row["shadow_classifier_label"]
 
 
+# ── Stage 2: list-extraction post-processing ─────────────────────────
+
+
+def test_total_line_appended_when_missing_from_ms_count():
+    """LLM forgot 'Total: N' — we append it after counting list items."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    hyp = (
+        "You bought:\n"
+        "- apples [Note 3]\n"
+        "- oranges [Note 5]\n"
+        "- pears [Note 7]\n"
+    )
+    out = maybe_append_total_line(hyp, "multi-session", counting=True)
+    assert "Total: 3" in out
+    assert out.startswith(hyp.rstrip())  # original list intact
+
+
+def test_total_line_skipped_when_already_present():
+    """Don't double-append if LLM already wrote a Total line."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    hyp = "- a\n- b\n\nTotal: 2"
+    out = maybe_append_total_line(hyp, "multi-session", counting=True)
+    assert out == hyp  # unchanged
+
+
+def test_total_line_recognizes_count_or_answer_synonyms():
+    """'Count: 3', 'Answer: 5', 'total: 4' all count as already-present."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    for synonym in ("Count: 3", "Answer: 3", "total: 3", "TOTAL = 3"):
+        hyp = f"- a\n- b\n- c\n\n{synonym}"
+        out = maybe_append_total_line(hyp, "multi-session", counting=True)
+        assert out == hyp, f"unexpected append for synonym: {synonym!r}"
+
+
+def test_total_line_skipped_for_non_ms_categories():
+    """Only fires for multi-session category."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    hyp = "- a\n- b\n- c"
+    for cat in ("temporal-reasoning", "single-session-user", "knowledge-update"):
+        out = maybe_append_total_line(hyp, cat, counting=True)
+        assert out == hyp, f"unexpectedly appended for {cat}"
+
+
+def test_total_line_skipped_for_non_counting_questions():
+    """MS but not a counting question — leave alone."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    out = maybe_append_total_line(
+        "- a\n- b\n- c", "multi-session", counting=False)
+    assert out == "- a\n- b\n- c"
+
+
+def test_total_line_skipped_when_too_few_list_items():
+    """A single bullet might be incidental — don't fire on len<2."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    out = maybe_append_total_line(
+        "- only one item", "multi-session", counting=True)
+    assert "Total" not in out
+
+
+def test_total_line_handles_numbered_lists():
+    """1. foo / 1) foo  — both recognized."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    hyp = "1. apples\n2. oranges\n3) pears"
+    out = maybe_append_total_line(hyp, "multi-session", counting=True)
+    assert "Total: 3" in out
+
+
+def test_total_line_handles_empty_hypothesis():
+    from scripts.run_longmemeval import maybe_append_total_line
+    assert maybe_append_total_line("", "multi-session", counting=True) == ""
+    assert maybe_append_total_line("   \n", "multi-session", counting=True) == "   \n"
+
+
+# ── Stage 2: prompt + classifier config changes ──────────────────────
+
+
+def test_counting_k_floor_bumped_to_60():
+    """Stage 2: counting K floor bumped 45 → 60 for wider MS recall."""
+    from scripts.longmemeval.classifier import COUNTING_K_FLOOR
+    assert COUNTING_K_FLOOR == 60
+
+
+def test_multi_session_min_rel_lowered_to_005():
+    """Stage 2: MS min_rel dropped 0.08 → 0.05 to keep more borderline candidates."""
+    from scripts.longmemeval.classifier import FILTER_CONFIG
+    assert FILTER_CONFIG["multi-session"]["min_rel"] == 0.05
+
+
+def test_multisession_prompt_has_stage2_enumeration_discipline():
+    """The MS prompt includes the new Stage 2 enumeration rules and final-line format."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION
+    # Atlas/AgentMemory rules
+    assert "ENUMERATION DISCIPLINE" in RAG_PROMPT_MULTISESSION
+    assert "USER STATEMENT BEATS ASSISTANT SKEPTICISM" in RAG_PROMPT_MULTISESSION
+    assert "Preserve quantities, units, and dates EXACTLY" in RAG_PROMPT_MULTISESSION
+    # Final-line format reinforcement
+    assert 'Your final line MUST be exactly: "Total: N"' in RAG_PROMPT_MULTISESSION
+    # Old strict-match rule was softened — should NOT include the original phrasing
+    assert "REMOVE items that don't strictly match" not in RAG_PROMPT_MULTISESSION
+
+
 # ── Stage 1: abstention guard ─────────────────────────────────────────
 
 
