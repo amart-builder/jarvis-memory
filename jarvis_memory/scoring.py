@@ -229,6 +229,7 @@ def scored_search(
     room: Optional[str] = None,
     hall: Optional[str] = None,
     memory_type: Optional[str] = None,
+    agent_id: Optional[str] = None,
     as_of: Optional[str] = None,
     seen_as_of: Optional[str] = None,
     limit: int = 10,
@@ -253,6 +254,10 @@ def scored_search(
         room: Topic filter.
         hall: Category filter.
         memory_type: Specific memory type filter.
+        agent_id: Filter by logical writer identity ("claude-code",
+            "openclaw", "cron", "hooks", etc.). Useful for "which system
+            wrote this?" debugging — pre-A3.1 data has no agent_id and
+            won't match a specific filter.
         as_of: ISO date — *event-time* validity filter via
             :func:`jarvis_memory.temporal.filter_by_date`. Answers
             "what was true in the world on date X?"
@@ -297,6 +302,7 @@ def scored_search(
             room=room,
             hall=hall,
             memory_type=memory_type,
+            agent_id=agent_id,
             as_of=as_of,
             seen_as_of=seen_as_of,
             limit=limit,
@@ -395,6 +401,7 @@ def scored_search(
             room=room,
             hall=hall,
             memory_type=memory_type,
+            agent_id=agent_id,
             as_of=as_of,
             seen_as_of=seen_as_of,
             limit=limit,
@@ -433,6 +440,7 @@ def scored_search(
         room=room,
         hall=hall,
         memory_type=memory_type,
+        agent_id=agent_id,
         as_of=as_of,
         seen_as_of=seen_as_of,
     )
@@ -635,6 +643,7 @@ def _apply_filters(
     memory_type: Optional[str],
     as_of: Optional[str],
     seen_as_of: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Apply the REST-level filters with legacy-compatible semantics.
 
@@ -657,6 +666,11 @@ def _apply_filters(
             if r.get("memory_type") == memory_type
             or r.get("episode_type") == memory_type
         ]
+    if agent_id:
+        # Strict equality. Pre-B2 records have no agent_id and won't
+        # match a specific filter — that's correct behavior. Drop the
+        # filter to include them.
+        out = [r for r in out if r.get("agent_id") == agent_id]
     if as_of:
         try:
             from .temporal import filter_by_date
@@ -683,6 +697,7 @@ def _legacy_scored_search(
     memory_type: Optional[str],
     as_of: Optional[str],
     seen_as_of: Optional[str] = None,
+    agent_id: Optional[str] = None,
     limit: int,
     driver,
     embedding_store,
@@ -757,6 +772,8 @@ def _legacy_scored_search(
             if r.get("memory_type") == memory_type
             or r.get("episode_type") == memory_type
         ]
+    if agent_id:
+        results = [r for r in results if r.get("agent_id") == agent_id]
 
     scored = score_results(results, similarity_key="similarity")
     for rec in scored:

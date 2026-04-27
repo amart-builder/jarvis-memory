@@ -166,6 +166,14 @@ JARVIS_TOOLS = [
                         "the world on date Y?'"
                     ),
                 },
+                "agent_id": {
+                    "type": "string",
+                    "description": (
+                        "Filter by writer system: 'claude-code', 'openclaw', "
+                        "'cron', 'hooks'. Pre-B2 episodes have no agent_id and "
+                        "won't match a specific filter."
+                    ),
+                },
                 "limit": {"type": "integer", "description": "Max results (default 10)", "default": 10},
                 "memory_type": {"type": "string", "description": "Filter by specific memory type (optional)"},
             },
@@ -330,6 +338,15 @@ JARVIS_TOOLS = [
                 "session_id": {"type": "string", "description": "Session UUID (auto-created if omitted)"},
                 "episode_type": {"type": "string", "description": "Memory type (auto-classified if omitted)"},
                 "importance": {"type": "number", "description": "Importance 0-1 (default 0.8)", "default": 0.8},
+                "agent_id": {
+                    "type": "string",
+                    "description": (
+                        "Logical writer identity (e.g. 'claude-code', 'openclaw', "
+                        "'cron', 'hooks'). Defaults to 'claude-code' for MCP "
+                        "writes. Used for cross-system debugging — filterable "
+                        "via scored_search."
+                    ),
+                },
             },
             "required": ["content"],
         },
@@ -707,6 +724,7 @@ async def _dispatch(
         hall = args.get("hall")
         as_of = args.get("as_of")
         seen_as_of = args.get("seen_as_of")
+        agent_id_filter = args.get("agent_id")
         limit = args.get("limit", 10)
         memory_type = args.get("memory_type")
 
@@ -726,6 +744,8 @@ async def _dispatch(
                     where_filter["hall"] = hall
                 if memory_type:
                     where_filter["memory_type"] = memory_type
+                if agent_id_filter:
+                    where_filter["agent_id"] = agent_id_filter
 
                 # Oversample from ChromaDB for scoring
                 chromadb_results = store.search(
@@ -783,6 +803,11 @@ async def _dispatch(
                         from jarvis_memory.temporal import filter_by_seen_as_of
 
                         scored = filter_by_seen_as_of(scored, seen_as_of)
+                    if agent_id_filter:
+                        # Belt-and-suspenders alongside the Chroma where_filter.
+                        # The Chroma side was best-effort metadata filtering;
+                        # this keeps the post-hoc enriched view honest.
+                        scored = [r for r in scored if r.get("agent_id") == agent_id_filter]
 
                     scored.sort(key=lambda x: x["composite_score"], reverse=True)
 
@@ -797,6 +822,7 @@ async def _dispatch(
                             "hall": hall,
                             "as_of": as_of,
                             "seen_as_of": seen_as_of,
+                            "agent_id": agent_id_filter,
                         },
                     }
             except Exception as e:
@@ -1008,12 +1034,16 @@ async def _dispatch(
         episode_type = args.get("episode_type")
         content = args["content"]
 
+        # Default MCP writer to "claude-code" — Claude Code is the
+        # dominant MCP client today. Other MCP clients can override
+        # by passing ``agent_id`` explicitly in the tool args.
         episode_id = er.record_episode(
             session_id=session_id,
             content=content,
             episode_type=episode_type,
             group_id=group_id,  # explicit — don't rely on session inheritance
             importance=args.get("importance", 0.8),
+            agent_id=args.get("agent_id") or "claude-code",
         )
         sm.close()
 

@@ -230,6 +230,9 @@ class ScoredSearchRequest(BaseModel):
     # Independent; pass either, both, or neither.
     as_of: Optional[str] = None
     seen_as_of: Optional[str] = None
+    # Filter by writer system: "claude-code", "openclaw", "cron", "hooks".
+    # Pre-B2 episodes have no agent_id and won't match — that's correct.
+    agent_id: Optional[str] = None
     limit: int = 10
     memory_type: Optional[str] = None
 
@@ -240,6 +243,10 @@ class SaveEpisodeRequest(BaseModel):
     episode_type: Optional[str] = None
     importance: float = 0.8
     source: str = "atlas"
+    # Logical writer identity. Used for filtering ("which system wrote
+    # this?") and cross-system debugging. When omitted on REST writes,
+    # record_episode defaults to "openclaw" (the dominant REST consumer).
+    agent_id: Optional[str] = None
 
 
 class FactValidityRequest(BaseModel):
@@ -585,6 +592,7 @@ async def scored_search(req: ScoredSearchRequest):
             room=req.room,
             hall=req.hall,
             memory_type=req.memory_type,
+            agent_id=req.agent_id,
             as_of=req.as_of,
             seen_as_of=req.seen_as_of,
             limit=req.limit,
@@ -610,6 +618,7 @@ async def scored_search(req: ScoredSearchRequest):
                 "hall": req.hall,
                 "as_of": req.as_of,
                 "seen_as_of": req.seen_as_of,
+                "agent_id": req.agent_id,
             },
         }
     except HTTPException:
@@ -655,12 +664,15 @@ async def save_episode(req: SaveEpisodeRequest):
             )
             session_id = session_result["uuid"]
 
-        # Record episode
+        # Record episode. Default REST writer to "openclaw" — the
+        # dominant client today (mem0-extractor hook, session hooks).
+        # Callers can override with an explicit ``agent_id`` field.
         episode_id = er.record_episode(
             session_id=session_id,
             content=req.content,
             episode_type=episode_type,
             importance=req.importance,
+            agent_id=req.agent_id or "openclaw",
         )
         sm.close()
 
