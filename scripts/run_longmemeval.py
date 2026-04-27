@@ -60,6 +60,8 @@ from scripts.longmemeval.prompts import (  # noqa: E402
     format_session_for_prompt,
     format_session_text,
     parse_longmemeval_date,
+    render_ms_count_prompt,
+    render_ms_extract_prompt,
     render_prompt,
 )
 
@@ -931,6 +933,9 @@ def run_one_question(
     # Stage 1.5 defaults — populated after classification succeeds.
     lme_intent = "NEUTRAL"
     lme_channel_weights: tuple[float, float] = (1.0, 1.0)
+    # Stage 4A defaults — populated only on multi-session counting questions.
+    ms_two_pass_used = False
+    ms_pass1_chars = 0
 
     t0 = time.time()
     try:
@@ -1014,7 +1019,7 @@ def run_one_question(
                 group_id=group_id,
             )
 
-        # 4. Format prompt.
+        # 4. Format sessions block (shared across single-pass + two-pass).
         sessions_text = "\n\n".join(
             format_session_for_prompt(
                 content=h.get("content", ""),
@@ -1022,12 +1027,6 @@ def run_one_question(
                 index=i + 1,  # 1-indexed for [Note N] readability
             )
             for i, h in enumerate(hits)
-        )
-        prompt = render_prompt(
-            category=category,
-            sessions=sessions_text,
-            question=question,
-            question_date=qdate,
         )
 
         # 4.5. Stage 1: confidence-based abstention guard. When retrieval
@@ -1040,15 +1039,54 @@ def run_one_question(
             top_score=top_score,
         )
         abstention_fired = abstention_prefix is not None
-        if abstention_prefix is not None:
-            prompt = abstention_prefix + prompt
 
-        # 5. Generate.
-        hypothesis = call_llm(
-            answerer=answerer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-        )
+        # 5. Generate. Stage 4A: multi-session counting questions use a
+        # two-pass extract-then-count flow — the single-pass MS prompt
+        # under-counts because the model prunes during enumeration. Split
+        # into a high-recall extract pass + a high-precision count pass.
+        # Failure analysis on Stage 1.5 still-wrongs found 0/17 retrieval
+        # misses, confirming this is purely a generation problem.
+        ms_two_pass_used = (category == "multi-session" and counting)
+        if ms_two_pass_used:
+            pass1_prompt = render_ms_extract_prompt(
+                sessions=sessions_text,
+                question=question,
+                question_date=qdate,
+            )
+            pass1_hyp = call_llm(
+                answerer=answerer,
+                prompt=pass1_prompt,
+                max_tokens=max_tokens,
+            )
+            ms_pass1_chars = len(pass1_hyp)
+
+            pass2_prompt = render_ms_count_prompt(
+                sessions=sessions_text,
+                candidate_list=pass1_hyp,
+                question=question,
+                question_date=qdate,
+            )
+            if abstention_prefix is not None:
+                pass2_prompt = abstention_prefix + pass2_prompt
+            hypothesis = call_llm(
+                answerer=answerer,
+                prompt=pass2_prompt,
+                max_tokens=max_tokens,
+            )
+        else:
+            prompt = render_prompt(
+                category=category,
+                sessions=sessions_text,
+                question=question,
+                question_date=qdate,
+            )
+            if abstention_prefix is not None:
+                prompt = abstention_prefix + prompt
+            hypothesis = call_llm(
+                answerer=answerer,
+                prompt=prompt,
+                max_tokens=max_tokens,
+            )
 
         # 5.5. Stage 2: defensive total-line post-process for MS counting
         # questions when the LLM forgot the "Total: N" final line. No-op
@@ -1077,6 +1115,8 @@ def run_one_question(
             "top_score": round(top_score, 4),
             "abstention_fired": abstention_fired,
             "total_line_appended": total_line_appended,
+            "ms_two_pass_used": ms_two_pass_used,
+            "ms_pass1_chars": ms_pass1_chars,
             "max_tokens": max_tokens,
             "answerer": answerer,
             # Stage 0: ``seed`` arg is honored only for OpenAI answerers
@@ -1112,6 +1152,8 @@ def run_one_question(
             "top_score": round(top_score, 4),
             "abstention_fired": abstention_fired,
             "total_line_appended": total_line_appended,
+            "ms_two_pass_used": ms_two_pass_used,
+            "ms_pass1_chars": ms_pass1_chars,
             "max_tokens": max_tokens,
             "answerer": answerer,
             "seed_honored": answerer in ("gpt4o", "gpt41"),

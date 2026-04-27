@@ -143,6 +143,97 @@ Question: {question}
 Answer:"""
 
 
+# ── MULTISESSION two-pass (Stage 4A) ──────────────────────────────────
+# Failure analysis on Stage 1.5 still-wrongs: 0/17 multi-session failures
+# were retrieval misses — gold sessions were all in top 20. The model
+# under-counts because it prunes during enumeration ("this might be a
+# duplicate, skip it" → final count too low). Splitting enumeration
+# from counting fixes this: pass 1 lists every candidate without
+# judgment; pass 2 dedupes + counts using the candidate list AND the
+# original notes. Standard cognitive-offload pattern.
+RAG_PROMPT_MULTISESSION_EXTRACT: Final[str] = """\
+I will give you several notes from past conversations between you and a user, \
+ordered from oldest to newest. The user is going to ask a question that \
+involves counting, listing, or aggregating items across multiple notes.
+
+YOUR JOB IN THIS PASS: extract a CANDIDATE LIST of every mention that could \
+plausibly be relevant. Be MAXIMALLY INCLUSIVE — recall matters, precision \
+does NOT.
+
+Rules for this pass:
+- INCLUDE items even if they look like duplicates of other items. \
+A separate dedup pass handles that. If two notes mention what might be the \
+same event, list them BOTH as separate candidates.
+- INCLUDE items even if the match to the question is borderline or unclear. \
+A separate judgment pass handles that.
+- INCLUDE items even if the assistant in the conversation expressed doubt — \
+the user's statement is what counts.
+- Do NOT compute a total. Do NOT decide which items truly match. Do NOT \
+dedupe. Just LIST.
+- Format: a numbered list. For each item, quote the user's relevant words \
+and cite the source as [Note #]. One item per line.
+- If you find zero candidates, output the single line "No candidates found."
+
+Notes from past conversations:
+
+{sessions}
+
+Current Date: {question_date}
+Question: {question}
+
+Candidate list (be liberal — include borderline items, do NOT count, do NOT \
+dedupe):"""
+
+
+RAG_PROMPT_MULTISESSION_COUNT: Final[str] = """\
+I will give you (1) several notes from past conversations between you and a \
+user, (2) a candidate list extracted from those notes by an earlier pass, \
+and (3) the user's question.
+
+YOUR JOB: produce the FINAL ANSWER. Decide which candidates truly match the \
+question, merge near-duplicates, count, and answer.
+
+Rules:
+- INCLUSION RULE: for each candidate in the list, ask: "is it plausible \
+that the user's statement is consistent with the question?" KEEP unless it \
+CLEARLY contradicts the question. Borderline candidates COUNT. The user's \
+mention is the count — do NOT drop candidates because the reason/detail/\
+context is not 100% spelled out. If the user mentioned a thing that \
+plausibly satisfies the question, count it.
+- DEDUPLICATION: if two candidates describe the same underlying event/item \
+(e.g., "cousin's wedding" and "Rachel's wedding at a vineyard" — likely the \
+same wedding), MERGE into one. Err on the side of merging when borderline.
+- USER STATEMENT BEATS ASSISTANT SKEPTICISM. If the user said they did the \
+thing, count it. Even if the assistant in the conversation expressed doubt.
+- Preserve quantities, units, and dates EXACTLY as the user stated them.
+- For "how many"/count/total questions: \
+  1. List each KEPT item briefly, citing [Note #]. \
+  2. End with EXACTLY: "Total: N" where N is the integer count after \
+deduplication. \
+  3. Be decisive — never "approximately N" or "2 or 3".
+- For "how much" sum questions: list each amount with [Note #], sum, state \
+the total numerically.
+- For "increase/decrease/change" questions: find BOTH starting and ending \
+values, compute the difference. Do NOT report the final value as the change.
+- If the candidate list is empty OR every candidate clearly contradicts \
+the question, say the information is not enough — do NOT guess.
+- NEVER fabricate values that aren't in the notes.
+
+Notes from past conversations (for verification):
+
+{sessions}
+
+Candidate list (from extraction pass — items here may be duplicates or \
+non-matches; you decide):
+
+{candidate_list}
+
+Current Date: {question_date}
+Question: {question}
+
+Final answer:"""
+
+
 # ── PREFERENCE: best for single-session-preference ────────────────────
 # Forces personalization — generic advice is wrong.
 RAG_PROMPT_PREFERENCE: Final[str] = """\
@@ -292,6 +383,27 @@ def render_prompt(
     template = get_prompt_template(category)
     return template.format(
         sessions=sessions,
+        question=question,
+        question_date=question_date,
+    )
+
+
+def render_ms_extract_prompt(
+    *, sessions: str, question: str, question_date: str,
+) -> str:
+    """Stage 4A pass 1: extract candidate list (high-recall, no count)."""
+    return RAG_PROMPT_MULTISESSION_EXTRACT.format(
+        sessions=sessions, question=question, question_date=question_date,
+    )
+
+
+def render_ms_count_prompt(
+    *, sessions: str, candidate_list: str, question: str, question_date: str,
+) -> str:
+    """Stage 4A pass 2: dedupe + count from the candidate list (high-precision)."""
+    return RAG_PROMPT_MULTISESSION_COUNT.format(
+        sessions=sessions,
+        candidate_list=candidate_list,
         question=question,
         question_date=question_date,
     )

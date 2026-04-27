@@ -1049,14 +1049,16 @@ def test_run_one_question_error_row_carries_stage1_fields(monkeypatch):
     )
     assert row["error"]
     # All Stage 1 + earlier observability fields must be present.
-    # Stage 1.5: lme_intent + lme_channel_weights also covered — guards
-    # the defensive defaults at the top of run_one_question against
-    # accidental removal.
+    # Stage 1.5: lme_intent + lme_channel_weights also covered.
+    # Stage 4A: ms_two_pass_used + ms_pass1_chars also covered.
+    # Together these guard the defensive defaults at the top of
+    # run_one_question against accidental removal.
     for f in ("n_sessions_ingested", "n_hits_used", "n_hits_pre_trim",
               "top_score", "abstention_fired", "max_tokens",
               "category_source", "shadow_classifier_label", "classifier_rule",
               "counting", "seed_honored",
-              "lme_intent", "lme_channel_weights"):
+              "lme_intent", "lme_channel_weights",
+              "ms_two_pass_used", "ms_pass1_chars"):
         assert f in row, f"error row missing field {f!r}"
     assert row["n_hits_pre_trim"] == 2  # retrieval succeeded before crash
     assert row["n_sessions_ingested"] == 2
@@ -1308,3 +1310,191 @@ def test_lme_weighted_rerank_dedupes_repeat_ids_in_channels():
     a_score = next(h["_lme_weighted_score"] for h in out if h["id"] == "a")
     expected = 1.0 / (0 + 60) + 0.5 / (0 + 60)  # vec + composite
     assert abs(a_score - expected) < 1e-12
+
+
+# ── Stage 4A — MS-counting two-pass extract-then-count ──────────────
+
+
+def test_run_one_question_ms_counting_fires_two_pass(monkeypatch):
+    """For multi-session counting questions, the adapter should call
+    the LLM twice: once to extract candidates, once to dedupe + count."""
+    from scripts import run_longmemeval as adapter
+
+    fake_hits = [
+        {"uuid": "lme_q_qX__001_x", "content": "I baked banana bread.",
+         "score": 0.5, "similarity": 0.5,
+         "referenced_date": "2024-01-01T00:00:00"},
+        {"uuid": "lme_q_qX__002_y", "content": "I baked cookies twice.",
+         "score": 0.4, "similarity": 0.4,
+         "referenced_date": "2024-01-02T00:00:00"},
+    ]
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 2)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe",
+                        lambda **kw: list(fake_hits))
+
+    calls: list[str] = []
+
+    def spy_call(**kw):
+        prompt = kw["prompt"]
+        if "Candidate list" in prompt and "Final answer" in prompt:
+            calls.append("count")
+            return "1. banana bread\n2. cookies\n3. cookies\nTotal: 3"
+        else:
+            calls.append("extract")
+            return ("1. banana bread [Note 1]\n2. cookies [Note 2]\n"
+                    "3. cookies again [Note 2]")
+
+    monkeypatch.setattr(adapter, "call_llm", spy_call)
+
+    q = {"question_id": "qX", "question": "How many times did I bake?",
+         "question_date": "", "haystack_sessions": [],
+         "haystack_session_ids": [], "haystack_dates": []}
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="multi-session",
+    )
+    # Both passes ran in order.
+    assert calls == ["extract", "count"]
+    assert row["ms_two_pass_used"] is True
+    assert row["ms_pass1_chars"] > 0
+    # Final hypothesis is from pass 2 (the one with "Total: 3").
+    assert "Total: 3" in row["hypothesis"]
+
+
+def test_run_one_question_ms_non_counting_uses_single_pass(monkeypatch):
+    """A multi-session question that is NOT a counting question (e.g.
+    'what was my pref') should NOT fire two-pass — single LLM call only."""
+    from scripts import run_longmemeval as adapter
+
+    fake_hits = [
+        {"uuid": "lme_q_qX__001_x", "content": "I prefer red wine.",
+         "score": 0.5, "similarity": 0.5,
+         "referenced_date": "2024-01-01T00:00:00"},
+    ]
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe",
+                        lambda **kw: list(fake_hits))
+
+    n_calls = [0]
+
+    def counting_spy(**kw):
+        n_calls[0] += 1
+        return "Red wine."
+
+    monkeypatch.setattr(adapter, "call_llm", counting_spy)
+
+    q = {"question_id": "qX", "question": "What wine do I prefer?",
+         "question_date": "", "haystack_sessions": [],
+         "haystack_session_ids": [], "haystack_dates": []}
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="multi-session",
+    )
+    assert n_calls[0] == 1, "non-counting MS should be single-pass"
+    assert row["ms_two_pass_used"] is False
+    assert row["ms_pass1_chars"] == 0
+
+
+def test_run_one_question_temporal_counting_does_not_fire_two_pass(monkeypatch):
+    """Two-pass is multi-session-specific. A temporal-reasoning counting
+    question (e.g. 'how many days') must use the TEMPORAL prompt, not MS
+    two-pass — different reasoning rules."""
+    from scripts import run_longmemeval as adapter
+
+    fake_hits = [
+        {"uuid": "lme_q_qX__001_x", "content": "I worked Mon-Fri.",
+         "score": 0.5, "similarity": 0.5,
+         "referenced_date": "2024-01-01T00:00:00"},
+    ]
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe",
+                        lambda **kw: list(fake_hits))
+
+    n_calls = [0]
+    monkeypatch.setattr(adapter, "call_llm",
+                        lambda **kw: (n_calls.__setitem__(0, n_calls[0]+1) or "5"))
+
+    q = {"question_id": "qX", "question": "How many days did I work?",
+         "question_date": "", "haystack_sessions": [],
+         "haystack_session_ids": [], "haystack_dates": []}
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="temporal-reasoning",
+    )
+    assert n_calls[0] == 1, "temporal counting should be single-pass"
+    assert row["ms_two_pass_used"] is False
+
+
+def test_run_one_question_ms_counting_two_pass_passes_pass1_to_pass2(monkeypatch):
+    """Pass 2's prompt must contain the candidate list emitted by pass 1.
+    Drift between passes (e.g. dropping the candidate list) silently breaks
+    the entire two-pass benefit."""
+    from scripts import run_longmemeval as adapter
+
+    fake_hits = [
+        {"uuid": "lme_q_qX__001_x", "content": "I baked.",
+         "score": 0.5, "similarity": 0.5,
+         "referenced_date": "2024-01-01T00:00:00"},
+    ]
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe",
+                        lambda **kw: list(fake_hits))
+
+    pass1_marker = "WIDE_CANDIDATE_LIST_MARKER_42"
+    seen: dict[str, str] = {}
+
+    def spy(**kw):
+        prompt = kw["prompt"]
+        if "Candidate list" in prompt and "Final answer" in prompt:
+            seen["pass2_prompt"] = prompt
+            return "Total: 1"
+        else:
+            return f"1. baked [Note 1] {pass1_marker}"
+
+    monkeypatch.setattr(adapter, "call_llm", spy)
+
+    q = {"question_id": "qX", "question": "How many bakes?",
+         "question_date": "", "haystack_sessions": [],
+         "haystack_session_ids": [], "haystack_dates": []}
+    adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="multi-session",
+    )
+    assert pass1_marker in seen["pass2_prompt"], (
+        "pass 2 prompt is missing pass 1's candidate list"
+    )
+
+
+def test_run_one_question_ms_counting_pass1_crash_propagates_to_error_row(monkeypatch):
+    """If pass 1 crashes (network, timeout, etc.) the row should land in
+    the except block with ms_two_pass_used=True and ms_pass1_chars=0 —
+    diagnoses 'we tried two-pass and it broke at pass 1'."""
+    from scripts import run_longmemeval as adapter
+
+    fake_hits = [
+        {"uuid": "lme_q_qX__001_x", "content": "I baked.",
+         "score": 0.5, "similarity": 0.5,
+         "referenced_date": "2024-01-01T00:00:00"},
+    ]
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe",
+                        lambda **kw: list(fake_hits))
+
+    def boom(**kw):
+        raise RuntimeError("pass 1 dead")
+
+    monkeypatch.setattr(adapter, "call_llm", boom)
+
+    q = {"question_id": "qX", "question": "How many bakes?",
+         "question_date": "", "haystack_sessions": [],
+         "haystack_session_ids": [], "haystack_dates": []}
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="multi-session",
+    )
+    assert row["error"]
+    assert "pass 1 dead" in row["error"]
+    # The two-pass flag is set BEFORE pass 1 runs, so it shows up in the
+    # error row. ms_pass1_chars stays 0 because pass 1 never returned.
+    assert row["ms_two_pass_used"] is True
+    assert row["ms_pass1_chars"] == 0

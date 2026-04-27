@@ -163,3 +163,68 @@ def test_answer_to_str_handles_string():
 
 def test_answer_to_str_handles_int():
     assert answer_to_str(42) == "42"
+
+
+# ── Stage 4A — two-pass MS counting prompts ─────────────────────────
+
+
+def test_render_ms_extract_prompt_basic_structure():
+    from scripts.longmemeval.prompts import render_ms_extract_prompt
+    out = render_ms_extract_prompt(
+        sessions="[Note 1] foo\n[Note 2] bar",
+        question="How many bakes?",
+        question_date="2026-04-27T00:00:00",
+    )
+    # Pass 1 must NOT ask for a total — that's pass 2's job.
+    assert "Total: N" not in out
+    # Must instruct the model to be liberal / not dedupe.
+    assert "MAXIMALLY INCLUSIVE" in out
+    assert "Do NOT compute a total" in out
+    # Substitutions plumbed through.
+    assert "[Note 1] foo" in out
+    assert "How many bakes?" in out
+    assert "2026-04-27T00:00:00" in out
+
+
+def test_render_ms_count_prompt_basic_structure():
+    from scripts.longmemeval.prompts import render_ms_count_prompt
+    out = render_ms_count_prompt(
+        sessions="[Note 1] foo",
+        candidate_list="1. baked banana bread [Note 1]",
+        question="How many bakes?",
+        question_date="2026-04-27T00:00:00",
+    )
+    # Pass 2 MUST instruct the model to output Total: N.
+    assert 'Total: N' in out
+    # Must reference the candidate list (not just the notes).
+    assert "Candidate list" in out
+    assert "1. baked banana bread [Note 1]" in out
+    # Original notes still visible for verification.
+    assert "[Note 1] foo" in out
+    # Question + date plumbed through.
+    assert "How many bakes?" in out
+
+
+def test_ms_extract_and_count_prompts_use_same_question_keys():
+    """Both passes substitute {sessions}, {question}, {question_date}.
+    Pass 2 also substitutes {candidate_list}. Drift between them would
+    silently break — pin the contract."""
+    from scripts.longmemeval.prompts import (
+        RAG_PROMPT_MULTISESSION_EXTRACT,
+        RAG_PROMPT_MULTISESSION_COUNT,
+    )
+    extract_keys = {"sessions", "question", "question_date"}
+    count_keys = {"sessions", "question", "question_date", "candidate_list"}
+    # Use string.Formatter to get the actual placeholders.
+    import string
+    fmt = string.Formatter()
+    extract_actual = {
+        f for _, f, _, _ in fmt.parse(RAG_PROMPT_MULTISESSION_EXTRACT)
+        if f
+    }
+    count_actual = {
+        f for _, f, _, _ in fmt.parse(RAG_PROMPT_MULTISESSION_COUNT)
+        if f
+    }
+    assert extract_actual == extract_keys
+    assert count_actual == count_keys
