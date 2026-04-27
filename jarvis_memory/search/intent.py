@@ -29,7 +29,7 @@ from typing import Literal
 
 __all__ = ["classify", "Intent"]
 
-Intent = Literal["entity", "temporal", "event", "general"]
+Intent = Literal["entity", "temporal", "event", "multi_hop", "general"]
 
 # Temporal phrase list. Matched case-insensitively against the query.
 # Includes single words (``yesterday``), short phrases (``last week``),
@@ -114,6 +114,33 @@ _PROPER_NOUN_PATTERN = re.compile(
     r"(?<![.!?]\s)(?<!^)\b(?:[A-Z][a-z][a-zA-Z0-9]+|[A-Z]{2,}[a-z]?)(?:\s+[A-Z][a-zA-Z0-9]+){0,2}\b"
 )
 
+# Associative / causal connector words. When present, the query is
+# asking about *relationships between* things rather than a single
+# fact — exactly the multi-hop case PPR is built for.
+_ASSOCIATIVE_PHRASES: tuple[str, ...] = (
+    "led to",
+    "leads to",
+    "leading to",
+    "because of",
+    "due to",
+    "caused by",
+    "drove",
+    "driven by",
+    "affected",
+    "affected by",
+    "influenced",
+    "influenced by",
+    "resulted in",
+    "tied to",
+    "connected to",
+    "related to",
+    "trail from",
+    "path from",
+    "between",
+    "across",
+    "linking",
+)
+
 # Short-circuit stopwords — the single-word query ``"Decision"`` should
 # not count as an entity. Mostly our own domain's tag vocabulary.
 _ENTITY_STOPWORDS: frozenset[str] = frozenset(
@@ -139,6 +166,36 @@ _ENTITY_STOPWORDS: frozenset[str] = frozenset(
         "which",
     }
 )
+
+
+def _proper_noun_count(query: str) -> int:
+    """Count distinct *mid-sentence* proper-noun phrases.
+
+    Multi-hop classification is sensitive to false positives — we don't
+    want "Notes on Rivian" to fire on "Notes" + "Rivian" as two entities.
+    Skip the sentence-initial token (the regex's ``(?<!^)`` does this
+    naturally when we don't pad the query). Trade-off: a query like
+    "Foundry Ventures" returns 0 here, which means it falls through to
+    the single-entity ``entity`` classifier — exactly right.
+    """
+    if not query:
+        return 0
+    seen: set[str] = set()
+    for m in _PROPER_NOUN_PATTERN.finditer(query):
+        token = m.group(0).strip()
+        head = token.split()[0].lower()
+        if head in _ENTITY_STOPWORDS:
+            continue
+        seen.add(token.lower())
+    return len(seen)
+
+
+def _contains_associative_phrase(query: str) -> bool:
+    """Causal / associative language indicates a relationship query."""
+    if not query:
+        return False
+    q = query.lower()
+    return any(phrase in q for phrase in _ASSOCIATIVE_PHRASES)
 
 
 def _contains_proper_noun(query: str) -> bool:
@@ -210,26 +267,38 @@ def classify(query: str) -> Intent:
     """Return the intent label for a user query.
 
     Priority order (first match wins):
-      1. ``temporal`` — query asks "when" something happened.
-      2. ``event`` — query asks about meetings/decisions/handoffs.
-      3. ``entity`` — query contains a proper noun.
-      4. ``general`` — fallback.
+      1. ``multi_hop`` — relationship query (≥2 entities OR causal/associative
+         phrase). Triggers the Personalized PageRank retrieval channel.
+      2. ``temporal`` — query asks "when" something happened.
+      3. ``event`` — query asks about meetings/decisions/handoffs.
+      4. ``entity`` — query contains a proper noun.
+      5. ``general`` — fallback.
 
-    Temporal beats event because "decisions last week" is first-and-foremost
-    a temporal slice — the retriever should use recency filters before
-    it filters by episode type. Event beats entity because "meeting with
-    Foundry" is structurally an event query about a specific entity —
-    searching the event retriever first (meeting-labeled episodes) is
-    the safer default.
+    Multi-hop beats temporal because "decisions in Catalyst that affected
+    Astack last week" is fundamentally a *relationship* query — slicing
+    by recency only at the end. Temporal beats event because "decisions
+    last week" is first a temporal slice. Event beats entity because
+    "meeting with Foundry" is structurally an event query about a
+    specific entity. Entity is the entity-only fallback.
 
     Args:
         query: User query. Empty / whitespace-only → ``"general"``.
 
     Returns:
-        One of ``"entity" | "temporal" | "event" | "general"``.
+        One of ``"entity" | "temporal" | "event" | "multi_hop" | "general"``.
     """
     if not query or not query.strip():
         return "general"
+
+    # Multi-hop fires on (a) two-or-more distinct proper nouns, OR
+    # (b) any single proper noun + an associative phrase. Single-entity
+    # factoid queries don't belong here — they're better served by
+    # vector + keyword. PPR shines when the answer is a *path* through
+    # the graph rather than a single doc.
+    pn_count = _proper_noun_count(query)
+    has_assoc = _contains_associative_phrase(query)
+    if pn_count >= 2 or (pn_count >= 1 and has_assoc):
+        return "multi_hop"
 
     if _contains_temporal(query):
         return "temporal"

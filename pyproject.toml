@@ -32,6 +32,10 @@ dependencies = [
     # already pulled in by sentence-transformers above. Default model
     # (BAAI/bge-reranker-v2-m3) downloads ~568MB on first call.
     "rerankers>=0.10",
+    # Multi-hop / Personalized-PageRank channel for scored_search (B1).
+    # Already installed transitively; declared explicitly because we use it
+    # as a first-party dep in jarvis_memory/search/ppr.py.
+    "networkx>=3.0",
 ]
 
 [project.optional-dependencies]
