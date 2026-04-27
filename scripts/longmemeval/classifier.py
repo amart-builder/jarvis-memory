@@ -294,3 +294,38 @@ ABSTENTION_FILTER: dict[str, float | int] = {
     "max_res": 5,
     "max_tokens": 256,
 }
+
+
+# Stage 1 (Atlas, scoped down 2026-04-27): per-category prompt-context
+# character budgets — but only for SS categories.
+#
+# Atlas's premise was "less context = less LLM distraction." That's
+# true ONLY when retrieval reliably puts the gold session in the top-K.
+# Live smoke on a temporal-reasoning question proved the trim is too
+# aggressive for high-context categories: gold sessions ranked 12/13/19
+# were dropped when the budget cut down to 3 hits, breaking a question
+# the baseline (20 hits, no trim) got right.
+#
+# So: trim aggressively for SS (answer is in 1 session, surplus =
+# distraction) and DO NOT trim for MS/TR/KU (LLM needs to scan many
+# sessions for enumeration / temporal arithmetic / recency comparison).
+# Categories absent from this dict skip the trim entirely.
+#
+# Token-to-char ratio for English ≈ 4. SS budget = 14000 chars ≈ 3500
+# tokens — Atlas's recommended SS context size.
+#
+# Floor of 3 hits is enforced regardless of budget — better noisy
+# context than empty.
+# Calibrated against measured median LongMemEval session size of ~10K
+# chars. Earlier 14K budget was a bug-trap: with min_hits=3 floor, the
+# trim always hit the floor first (3 × 10K = 30K > 14K) so the budget
+# never did real work — same behavior as a hard "max_hits=3" cap. 50K
+# allows ~5 typical sessions, which is between the SS max_res of 10-12
+# and the min_hits floor of 3.
+CONTEXT_BUDGET_CHARS: dict[str, int] = {
+    "single-session-user":       50000,
+    "single-session-assistant":  50000,
+    "single-session-preference": 50000,
+    # multi-session, knowledge-update, temporal-reasoning: no trim.
+}
+CONTEXT_BUDGET_MIN_HITS: int = 3

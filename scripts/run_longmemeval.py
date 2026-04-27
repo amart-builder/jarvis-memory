@@ -45,6 +45,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.longmemeval.classifier import (  # noqa: E402
     ABSTENTION_FILTER,
+    CONTEXT_BUDGET_CHARS,
+    CONTEXT_BUDGET_MIN_HITS,
     COUNTING_K_FLOOR,
     FILTER_CONFIG,
     K_FLOORS,
@@ -146,6 +148,179 @@ def apply_ppr_overrides() -> None:
 
     ppr_mod._extract_query_entities = broadened_extract
     ppr_mod.personalized_pagerank = ppr_with_alpha
+
+
+# ── Stage 1: confidence-based abstention guard ────────────────────────
+
+
+_PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-zA-Z][a-zA-Z]+)\b")
+
+# Common sentence-initial words that look like proper nouns when
+# capitalized but aren't entity references. Don't trigger abstention
+# guard on these.
+_ABSTENTION_GUARD_STOPWORDS: set[str] = {
+    "How", "What", "When", "Where", "Why", "Who", "Which",
+    "Did", "Do", "Does", "Is", "Are", "Was", "Were",
+    "Have", "Has", "Had", "Will", "Would", "Could", "Should", "Can",
+    "Tell", "Remind", "Give", "List", "Find", "Show",
+    "The", "This", "That", "These", "Those",
+    "And", "But", "Or", "If", "Then", "Also", "Just",
+    "I", "You", "We", "They", "It", "He", "She",
+    "Note", "Notes",  # collide with our [Note N] convention
+}
+
+
+def _extract_question_proper_nouns(question: str) -> list[str]:
+    """Pick out likely entity references from a question string.
+
+    Heuristic: capitalized words ≥3 chars, deduped (case-insensitive),
+    minus a stoplist of sentence-initial Wh-words and modals that get
+    accidentally capitalized.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in _PROPER_NOUN_RE.findall(question):
+        if w in _ABSTENTION_GUARD_STOPWORDS:
+            continue
+        key = w.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(w)
+    return out
+
+
+# Calibrated against the baseline run distribution. 0.30 was at the
+# median for SS-user (0.32) and KU (0.34) — would trigger on ~27% of
+# the run, mostly false positives. 0.20 matches OMEGA's own
+# ABSTENTION_FILTER.min_rel and only fires on the bottom ~10% of
+# retrieval-confidence cases — where the guard's value is real.
+_ABSTENTION_THRESHOLD: float = 0.20
+_ABSTENTION_RULE_TEMPLATE: str = (
+    "ABSTENTION RULE — read carefully:\n"
+    "Retrieval found NO session that specifically mentions {entities}. "
+    "If the notes below do not contain specific information about "
+    "{entities}, your answer MUST say you don't have enough information. "
+    "Do not guess or hallucinate.\n\n"
+)
+
+
+def maybe_build_abstention_prefix(
+    *,
+    question: str,
+    hits: list[dict[str, Any]],
+    top_score: float,
+    threshold: float = _ABSTENTION_THRESHOLD,
+) -> Optional[str]:
+    """Decide whether to prepend an abstention rule, return the text or None.
+
+    Triggers when BOTH conditions hold:
+      1. ``top_score < threshold`` — retrieval confidence is weak.
+      2. The question contains a proper noun that does NOT appear
+         (case-insensitively) in any retrieved hit's content.
+
+    The prepended block tells the LLM to abstain rather than hallucinate.
+    Targets the abstention false-negative failure mode: 4 ``_abs``
+    questions in the baseline run hallucinated answers when the truth
+    was "not enough information".
+
+    Returns ``None`` when the guard does NOT fire — caller skips the
+    prepend, prompt is unchanged. Pure function; never mutates inputs.
+    """
+    if top_score >= threshold:
+        return None
+    nouns = _extract_question_proper_nouns(question)
+    if not nouns:
+        return None
+
+    haystack = " ".join((h.get("content") or "") for h in hits).lower()
+    missing = [n for n in nouns if n.lower() not in haystack]
+    if not missing:
+        return None
+
+    # If multiple entities are missing, name up to two — keeps the
+    # injected text short and concrete.
+    label = " or ".join(repr(m) for m in missing[:2])
+    return _ABSTENTION_RULE_TEMPLATE.format(entities=label)
+
+
+# ── Stage 1: per-category prompt-context budget ───────────────────────
+
+
+def _hit_score(h: dict[str, Any]) -> float:
+    """Pick the best score field on a hit (composite_score > score > similarity)."""
+    for k in ("composite_score", "score", "similarity"):
+        v = h.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _hit_date_key(h: dict[str, Any]) -> str:
+    """Stable date key for prompt-order sorting (oldest first)."""
+    return str(h.get("referenced_date") or h.get("created_at") or "")
+
+
+def trim_to_context_budget(
+    hits: list[dict[str, Any]],
+    category: str,
+    budget_chars: Optional[int] = None,
+    min_hits: int = CONTEXT_BUDGET_MIN_HITS,
+) -> list[dict[str, Any]]:
+    """Drop lowest-scored hits until cumulative content fits the budget.
+
+    Categories absent from ``CONTEXT_BUDGET_CHARS`` skip the trim and
+    return the input unchanged (in date-sorted order). Categories
+    present (currently SS only) get aggressive trimming because the
+    answer to a single-session question is concentrated in 1 session
+    and surplus context just distracts the LLM.
+
+    Hits are first re-sorted by score (highest first) so the trim
+    drops bottom-of-the-rerank items, then re-sorted by date for the
+    prompt's "[Note N]" ordering convention.
+
+    A hard floor of ``min_hits`` is enforced — even if the first hit
+    alone exceeds budget, we keep the top ``min_hits`` so the LLM
+    isn't handed an empty context.
+
+    Args:
+        hits: Hit dicts as returned by ``retrieve_with_omega_recipe``.
+            Order doesn't matter (we re-sort).
+        category: Predicted category — keys ``CONTEXT_BUDGET_CHARS``.
+        budget_chars: Explicit override. ``None`` looks up the per-
+            category default; if category isn't in the budget dict,
+            no trimming happens. Test/debug knob.
+        min_hits: Floor on result size, never trim below this.
+
+    Returns:
+        New list of hits, date-sorted ascending (oldest first), with
+        cumulative ``content`` chars ≤ budget when budget applied.
+        Pure function — never mutates input list or its dicts.
+    """
+    if not hits:
+        return []
+    if budget_chars is None:
+        cfg_budget = CONTEXT_BUDGET_CHARS.get(category)
+        if cfg_budget is None:
+            # Category opted out of trimming — return date-sorted copy.
+            return sorted(hits, key=_hit_date_key)
+        budget_chars = cfg_budget
+
+    by_score = sorted(hits, key=_hit_score, reverse=True)
+    kept: list[dict[str, Any]] = []
+    total = 0
+    for h in by_score:
+        c = len(h.get("content") or "")
+        if kept and len(kept) >= min_hits and total + c > budget_chars:
+            break
+        kept.append(h)
+        total += c
+
+    kept.sort(key=_hit_date_key)
+    return kept
 
 
 # ── Stage 0: gold-session retrieval diagnostics ───────────────────────
@@ -465,19 +640,11 @@ def retrieve_with_omega_recipe(
     min_res = int(cfg["min_res"])
     max_res = int(cfg["max_res"])
 
-    def _score_of(h: dict) -> float:
-        # Prefer composite_score (RRF), fall back to similarity.
-        for k_ in ("composite_score", "score", "similarity"):
-            v = h.get(k_)
-            if v is not None:
-                return float(v)
-        return 0.0
-
-    primary.sort(key=_score_of, reverse=True)
+    primary.sort(key=_hit_score, reverse=True)
 
     # Keep top max_res; ensure at least min_res survive even if scores
     # are all below min_rel — better noisy context than empty.
-    above = [h for h in primary if _score_of(h) >= min_rel]
+    above = [h for h in primary if _hit_score(h) >= min_rel]
     if len(above) >= min_res:
         kept = above[:max_res]
     else:
@@ -494,14 +661,11 @@ def retrieve_with_omega_recipe(
             for i, h in enumerate(with_idx):
                 # Linearly scale 1.0× (oldest) to 1.5× (newest).
                 frac = i / (n - 1)
-                h["_kept_score"] = _score_of(h) * (1.0 + 0.5 * frac)
+                h["_kept_score"] = _hit_score(h) * (1.0 + 0.5 * frac)
             kept = sorted(with_idx, key=lambda h: h["_kept_score"], reverse=True)[:max_res]
 
     # Sort by referenced_date ascending (oldest → newest) for the prompt.
-    def _date_key(h: dict) -> str:
-        return str(h.get("referenced_date") or h.get("created_at") or "")
-
-    kept.sort(key=_date_key)
+    kept.sort(key=_hit_date_key)
     return kept
 
 
@@ -571,6 +735,7 @@ def run_one_question(
     embedding_store: Any,
     chroma_collection: Any,
     oracle_answer_session_ids: Optional[list[str]] = None,
+    oracle_category: Optional[str] = None,
 ) -> dict:
     """Execute the full pipeline for a single LongMemEval question.
 
@@ -582,6 +747,13 @@ def run_one_question(
     generation and attached to the row under ``"diagnostics"``. The
     oracle data does NOT alter the prompt or generation in any way —
     it's purely observational.
+
+    When ``oracle_category`` is provided (Stage 1 ``--use-oracle-categories``),
+    that label is used as the category instead of running the heuristic
+    classifier. The classifier still runs as a shadow so we can log its
+    prediction (``shadow_classifier_label``) for later analysis. This
+    leaks oracle ``question_type`` into routing — fine for benchmark-
+    competitive runs, NOT fine for the production-honest baseline.
     """
     qid = q["question_id"]
     # Defensive defaults so the error row in the except block always
@@ -589,12 +761,16 @@ def run_one_question(
     # classifier runs.
     category = "unknown"
     classifier_rule = ""
+    shadow_classifier_label = ""
+    category_source = "classifier"
     counting = False
     diagnostics: Optional[dict] = None
     n_sessions = 0
     hits: list[dict[str, Any]] = []
+    n_hits_pre_trim = 0
     top_score = 0.0
     max_tokens = 1024
+    abstention_fired = False
 
     t0 = time.time()
     try:
@@ -604,8 +780,14 @@ def run_one_question(
 
         group_id = f"lme_q_{qid}"
         classification = classify(question)
-        category = classification.label
+        shadow_classifier_label = classification.label
         classifier_rule = classification.rule
+        if oracle_category:
+            category = oracle_category
+            category_source = "oracle"
+        else:
+            category = classification.label
+            category_source = "classifier"
         counting = is_counting_question(question)
 
         cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
@@ -645,6 +827,13 @@ def run_one_question(
         else:
             top_score = 0.0
 
+        # 3.4. Stage 1: per-category prompt-context budget. Drops
+        # lowest-scored hits until cumulative content fits — keeps the
+        # prompt focused on the most relevant sessions and avoids
+        # distract-the-LLM failures on single-session questions.
+        n_hits_pre_trim = len(hits)
+        hits = trim_to_context_budget(hits, category)
+
         # 3.5. (Optional) gold-session retrieval diagnostics — Stage 0.
         # Computed on the final hits list (what enters the prompt) so we
         # answer "did the LLM see the gold session?" cleanly. Pure
@@ -674,6 +863,19 @@ def run_one_question(
             question_date=qdate,
         )
 
+        # 4.5. Stage 1: confidence-based abstention guard. When retrieval
+        # is weak AND the question names an entity nobody mentions, prepend
+        # an explicit abstention rule. Targets 4 _abs questions in the
+        # baseline that hallucinated answers instead of saying "not enough".
+        abstention_prefix = maybe_build_abstention_prefix(
+            question=question,
+            hits=hits,
+            top_score=top_score,
+        )
+        abstention_fired = abstention_prefix is not None
+        if abstention_prefix is not None:
+            prompt = abstention_prefix + prompt
+
         # 5. Generate.
         hypothesis = call_llm(
             answerer=answerer,
@@ -686,11 +888,15 @@ def run_one_question(
             "question_id": qid,
             "hypothesis": hypothesis,
             "predicted_category": category,
+            "category_source": category_source,
+            "shadow_classifier_label": shadow_classifier_label,
             "classifier_rule": classifier_rule,
             "counting": counting,
             "n_sessions_ingested": n_sessions,
             "n_hits_used": len(hits),
+            "n_hits_pre_trim": n_hits_pre_trim,
             "top_score": round(top_score, 4),
+            "abstention_fired": abstention_fired,
             "max_tokens": max_tokens,
             "answerer": answerer,
             # Stage 0: ``seed`` arg is honored only for OpenAI answerers
@@ -704,18 +910,28 @@ def run_one_question(
         return row
     except Exception:
         elapsed = time.time() - t0
+        # Preserve every observable that was captured before the crash —
+        # if retrieval succeeded but generation failed, these fields
+        # still contain real data and aid debugging.
         err_row: dict[str, Any] = {
             "question_id": qid,
             "hypothesis": "",
             "predicted_category": category,
+            "category_source": category_source,
+            "shadow_classifier_label": shadow_classifier_label,
             "classifier_rule": classifier_rule,
             "counting": counting,
+            "n_sessions_ingested": n_sessions,
+            "n_hits_used": len(hits),
+            "n_hits_pre_trim": n_hits_pre_trim,
+            "top_score": round(top_score, 4),
+            "abstention_fired": abstention_fired,
+            "max_tokens": max_tokens,
             "answerer": answerer,
             "seed_honored": answerer in ("gpt4o", "gpt41"),
             "elapsed_sec": round(elapsed, 2),
             "error": traceback.format_exc(),
         }
-        # Preserve retrieval-quality signal even when generation crashes.
         if diagnostics is not None:
             err_row["diagnostics"] = diagnostics
         return err_row
@@ -775,6 +991,13 @@ def write_run_summary(output_path: Path) -> Path:
     cat_errored: Counter[str] = Counter()
     elapsed_total = 0.0
     answerer_seen: set[str] = set()
+    # Stage 1 aggregates
+    abstention_fired_total = 0
+    category_source_counts: Counter[str] = Counter()
+    pretrim_total = 0
+    pretrim_n = 0
+    posttrim_total = 0
+    posttrim_n = 0
 
     diag_n = 0
     diag_n_abstention = 0  # rows whose oracle has no answer_session_ids
@@ -805,6 +1028,19 @@ def write_run_summary(output_path: Path) -> Path:
             ans = row.get("answerer")
             if ans:
                 answerer_seen.add(ans)
+            if row.get("abstention_fired"):
+                abstention_fired_total += 1
+            cs = row.get("category_source")
+            if cs:
+                category_source_counts[cs] += 1
+            pre = row.get("n_hits_pre_trim")
+            post = row.get("n_hits_used")
+            if isinstance(pre, int) and pre > 0:
+                pretrim_total += pre
+                pretrim_n += 1
+            if isinstance(post, int) and post > 0:
+                posttrim_total += post
+                posttrim_n += 1
 
             d = row.get("diagnostics")
             if isinstance(d, dict):
@@ -838,6 +1074,9 @@ def write_run_summary(output_path: Path) -> Path:
     def _pct(num: int, denom: int) -> Optional[float]:
         return round(num / denom, 4) if denom > 0 else None
 
+    def _avg(t: int, n: int) -> Optional[float]:
+        return round(t / n, 2) if n > 0 else None
+
     summary: dict[str, Any] = {
         "output_path": str(output_path),
         "answerer": sorted(answerer_seen),
@@ -846,6 +1085,11 @@ def write_run_summary(output_path: Path) -> Path:
         "elapsed_sec_total": round(elapsed_total, 2),
         "predicted_categories": dict(cat_total),
         "errored_by_category": dict(cat_errored),
+        "abstention_fired_total": abstention_fired_total,
+        "abstention_fired_pct": _pct(abstention_fired_total, n_total),
+        "category_source": dict(category_source_counts),
+        "avg_hits_pre_trim": _avg(pretrim_total, pretrim_n),
+        "avg_hits_used": _avg(posttrim_total, posttrim_n),
     }
     if diag_n > 0 or diag_n_abstention > 0:
         summary["diagnostics"] = {
@@ -915,6 +1159,12 @@ def main():
                         help="Stage 0: load oracle answer_session_ids and log retrieval-quality "
                              "diagnostics per question. Pure observation — does NOT alter prompts "
                              "or generation. Adds ~0 cost.")
+    parser.add_argument("--use-oracle-categories", action="store_true",
+                        help="Stage 1: read question_type directly from the oracle dataset and "
+                             "use it as the category, bypassing the heuristic classifier. The "
+                             "classifier still runs as a shadow so its prediction is logged for "
+                             "later analysis. Leaks oracle into routing — fine for benchmark-"
+                             "competitive runs, NOT for the production-honest baseline.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Stop after this many NEW questions (after resume).")
     parser.add_argument("--validate", action="store_true",
@@ -943,22 +1193,37 @@ def main():
         dataset = json.load(f)
     print(f"  Loaded {len(dataset)} questions")
 
-    # Stage 0: optional oracle diagnostics. Loaded once, indexed by qid.
-    oracle_by_qid: dict[str, list[str]] = {}
-    if args.diagnostics:
+    # Optional oracle data — Stage 0 (diagnostics) and Stage 1
+    # (use-oracle-categories) both source from the same file but populate
+    # independent maps. Load once if either flag is set.
+    oracle_answer_session_ids_by_qid: dict[str, list[str]] = {}
+    oracle_category_by_qid: dict[str, str] = {}
+    need_oracle = args.diagnostics or args.use_oracle_categories
+    if need_oracle:
         if not args.oracle_path.exists():
-            print(f"ERROR: --diagnostics set but oracle missing: {args.oracle_path}",
+            flag = "--diagnostics" if args.diagnostics else "--use-oracle-categories"
+            print(f"ERROR: {flag} set but oracle missing: {args.oracle_path}",
                   file=sys.stderr)
             return 2
-        print(f"Loading oracle for diagnostics: {args.oracle_path}")
+        print(f"Loading oracle: {args.oracle_path}")
         with args.oracle_path.open() as f:
             oracle = json.load(f)
         for o in oracle:
             qid = o.get("question_id")
-            sids = o.get("answer_session_ids") or []
-            if qid and sids:
-                oracle_by_qid[qid] = list(sids)
-        print(f"  Indexed {len(oracle_by_qid)} oracle answer-session lists")
+            if not qid:
+                continue
+            if args.diagnostics:
+                sids = o.get("answer_session_ids") or []
+                if sids:
+                    oracle_answer_session_ids_by_qid[qid] = list(sids)
+            if args.use_oracle_categories:
+                qtype = o.get("question_type")
+                if qtype:
+                    oracle_category_by_qid[qid] = qtype
+        if args.diagnostics:
+            print(f"  Indexed {len(oracle_answer_session_ids_by_qid)} oracle answer-session lists")
+        if args.use_oracle_categories:
+            print(f"  Indexed {len(oracle_category_by_qid)} oracle category labels")
 
     if args.question_id:
         dataset = [q for q in dataset if q["question_id"] == args.question_id]
@@ -999,7 +1264,8 @@ def main():
                     driver=driver,
                     embedding_store=embedding_store,
                     chroma_collection=chroma_collection,
-                    oracle_answer_session_ids=oracle_by_qid.get(q["question_id"]),
+                    oracle_answer_session_ids=oracle_answer_session_ids_by_qid.get(q["question_id"]),
+                    oracle_category=oracle_category_by_qid.get(q["question_id"]),
                 )
                 out.write(json.dumps(row) + "\n")
                 out.flush()
