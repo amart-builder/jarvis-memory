@@ -643,6 +643,33 @@ def test_run_one_question_uses_classifier_when_no_oracle_category(monkeypatch):
     assert row["predicted_category"] == row["shadow_classifier_label"]
 
 
+# ── Stage 3: TEMPORAL prompt + recency boost + K-floor changes ───────
+
+
+def test_temporal_prompt_has_step5_arithmetic_verification():
+    """Stage 3: TEMPORAL prompt now includes a STEP 5 self-verification pass."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_TEMPORAL
+    assert "STEP 5" in RAG_PROMPT_TEMPORAL
+    assert "VERIFY THE ARITHMETIC" in RAG_PROMPT_TEMPORAL
+    assert "USE THE NEW VALUE" in RAG_PROMPT_TEMPORAL
+
+
+def test_ss_user_k_floor_bumped_to_30():
+    """Stage 3: K_FLOORS['single-session-user'] bumped 20 → 30."""
+    from scripts.longmemeval.classifier import K_FLOORS
+    assert K_FLOORS["single-session-user"] == 30
+
+
+def test_other_k_floors_unchanged_in_stage3():
+    """Stage 3 only touched SS-user — everything else stays put."""
+    from scripts.longmemeval.classifier import K_FLOORS
+    assert K_FLOORS["single-session-assistant"] == 20
+    assert K_FLOORS["single-session-preference"] == 20
+    assert K_FLOORS["knowledge-update"] == 20
+    assert K_FLOORS["multi-session"] == 25
+    assert K_FLOORS["temporal-reasoning"] == 25
+
+
 # ── Stage 2: list-extraction post-processing ─────────────────────────
 
 

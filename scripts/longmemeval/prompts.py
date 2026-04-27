@@ -223,6 +223,16 @@ date (earliest first).
 absolute date, then state the total count.
   - For "when" questions: state the absolute date directly.
 
+STEP 5 — VERIFY THE ARITHMETIC:
+  Re-compute the answer one more time, from scratch, using the absolute dates \
+you wrote in STEP 1. If the result differs from STEP 4, USE THE NEW VALUE — your \
+first computation was wrong.
+  Specifically: count days between dates by subtracting day numbers within the \
+same month, OR by counting days through month boundaries (e.g., March 28 to April \
+3 = 3 days left in March + 3 days in April = 6 days). Do NOT estimate.
+  This step exists because gpt-class models reliably make off-by-one and \
+month-boundary errors when computing dates. The verification pass catches them.
+
 CRITICAL rules:
 - RECOLLECTION ≠ ACTION: When a note says "I was thinking about X", "I remembered X", \
 or "I was reminiscing about X", the event X did NOT happen on that note's date. \

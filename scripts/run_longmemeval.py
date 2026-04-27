@@ -711,9 +711,11 @@ def retrieve_with_omega_recipe(
         n = len(with_idx)
         if n > 1:
             for i, h in enumerate(with_idx):
-                # Linearly scale 1.0× (oldest) to 1.5× (newest).
+                # Stage 3 (2026-04-27): bumped recency multiplier 0.5 → 0.8
+                # so the freshest fact dominates more aggressively for KU.
+                # Linearly scale 1.0× (oldest) to 1.8× (newest).
                 frac = i / (n - 1)
-                h["_kept_score"] = _hit_score(h) * (1.0 + 0.5 * frac)
+                h["_kept_score"] = _hit_score(h) * (1.0 + 0.8 * frac)
             kept = sorted(with_idx, key=lambda h: h["_kept_score"], reverse=True)[:max_res]
 
     # Sort by referenced_date ascending (oldest → newest) for the prompt.

@@ -253,8 +253,10 @@ def classify(question: str) -> Classification:
 # broadening) additions per docs/eval/longmemeval-v1.1-protocol.md.
 
 # Top-K retrieval floors per category (OMEGA lines 1471-1483).
+# Stage 3 (2026-04-27): bumped single-session-user 20 → 30 to chase the
+# 11 SS-user wrongs in the baseline that look like retrieval misses.
 K_FLOORS: dict[str, int] = {
-    "single-session-user": 20,
+    "single-session-user": 30,
     "single-session-assistant": 20,
     "single-session-preference": 20,
     "knowledge-update": 20,
