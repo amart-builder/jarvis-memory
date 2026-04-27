@@ -28,6 +28,13 @@ from .boosts import (
 from .intent import classify
 from .expansion import expand, sanitize_expansion_output, sanitize_query_for_prompt
 
+# NOTE: ``rerank`` lives in ``jarvis_memory.search.rerank`` and is intentionally
+# NOT re-exported here. Re-exporting it would shadow the submodule (Python
+# resolves ``jarvis_memory.search.rerank`` to whichever attribute is in the
+# package namespace), breaking ``import jarvis_memory.search.rerank as rerank_mod``
+# and the monkeypatch hooks our tests rely on. Import via the full path:
+#     from jarvis_memory.search.rerank import rerank
+
 __all__ = [
     "Hit",
     "apply_boosts",
