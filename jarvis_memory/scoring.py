@@ -304,6 +304,7 @@ def scored_search(
     from .search.expansion import expand as default_expand
     from .search.intent import classify
     from .search.keyword import keyword_search
+    from .search.rerank import rerank as cross_encoder_rerank
     from .search.rrf import reciprocal_rank_fusion
 
     expand_fn = expand_fn or default_expand
@@ -425,6 +426,13 @@ def scored_search(
         memory_type=memory_type,
         as_of=as_of,
     )
+
+    # ── Cross-encoder rerank (env-gated, fail-open) ────────────────────
+    # RRF + boosts decided the candidate set; the cross-encoder gets the
+    # final say over order. When ``JARVIS_RERANK=0`` or the model can't
+    # load (no network on first call, etc.) the function returns the
+    # input unchanged — retrieval never breaks because of the reranker.
+    filtered = cross_encoder_rerank(query, filtered)
 
     # Attach composite_score for downstream consumers that expect that
     # key (wake_up, v1 search shim, etc.) without changing sort order.

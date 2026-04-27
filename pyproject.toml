@@ -27,6 +27,11 @@ dependencies = [
     # Pinned to major version we've tested end-to-end on Alex's Mini.
     "chromadb>=1.0,<2.0",
     "sentence-transformers>=3.0,<6.0",
+    # Cross-encoder reranking after RRF fusion (jarvis_memory/search/rerank.py).
+    # The package itself is tiny; the heavy backends (transformers, torch) are
+    # already pulled in by sentence-transformers above. Default model
+    # (BAAI/bge-reranker-v2-m3) downloads ~568MB on first call.
+    "rerankers>=0.10",
 ]
 
 [project.optional-dependencies]

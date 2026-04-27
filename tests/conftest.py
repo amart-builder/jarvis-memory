@@ -25,3 +25,9 @@ if _ENV_FILE.exists():
         _key, _, _val = _line.partition("=")
         _val = _val.split("#", 1)[0].strip()
         os.environ.setdefault(_key.strip(), _val)
+
+# Default reranking OFF in the test suite so we don't trigger a 568MB model
+# download on first call. Tests that explicitly cover the reranker monkeypatch
+# ``_get_model`` (or set ``JARVIS_RERANK=1``) themselves. Production defaults
+# stay on — see ``jarvis_memory/search/rerank.py``.
+os.environ.setdefault("JARVIS_RERANK", "0")
