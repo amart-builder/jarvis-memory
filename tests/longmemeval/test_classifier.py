@@ -20,8 +20,13 @@ from scripts.longmemeval.classifier import (
     ABSTENTION_FILTER,
     COUNTING_K_FLOOR,
     FILTER_CONFIG,
+    INTENT_NEUTRAL,
+    INTENT_OVERLAYS,
     K_FLOORS,
+    RETRIEVAL_PROFILES,
+    channel_weights,
     classify,
+    classify_lme_intent,
     is_counting_question,
 )
 
@@ -142,6 +147,131 @@ def test_abstention_filter_is_tight():
     assert ABSTENTION_FILTER["min_rel"] >= 0.20
     assert ABSTENTION_FILTER["max_res"] <= 5
     assert ABSTENTION_FILTER["max_tokens"] <= 256
+
+
+# ── Stage 1.5 — OMEGA retrieval profile + intent overlay ──────────────
+
+
+def test_retrieval_profiles_cover_all_six_categories():
+    """OMEGA's profile is keyed on the six LME question categories. If
+    one is missing, ``channel_weights`` silently falls back to the
+    SS-user profile — that's a real bug we want a test to catch."""
+    expected = {
+        "single-session-user", "single-session-assistant", "single-session-preference",
+        "knowledge-update", "multi-session", "temporal-reasoning",
+    }
+    assert set(RETRIEVAL_PROFILES) == expected
+    for cat, prof in RETRIEVAL_PROFILES.items():
+        assert {"vec", "kw"} == set(prof), f"{cat} profile missing channel"
+        # OMEGA's published multipliers fall in [0.5, 2.0]; anything wildly
+        # out of band is a typo.
+        for ch, w in prof.items():
+            assert 0.5 <= w <= 2.0, f"{cat}.{ch}={w} outside [0.5, 2.0]"
+
+
+def test_intent_overlays_disjoint_and_extreme():
+    """The three overlays should each pull HARD in opposite directions —
+    if FACTUAL/CONCEPTUAL look similar, the overlay isn't actually
+    discriminating between question types."""
+    assert set(INTENT_OVERLAYS) == {"FACTUAL", "CONCEPTUAL", "NAVIGATIONAL"}
+    factual = INTENT_OVERLAYS["FACTUAL"]
+    conceptual = INTENT_OVERLAYS["CONCEPTUAL"]
+    nav = INTENT_OVERLAYS["NAVIGATIONAL"]
+
+    # FACTUAL prefers keyword (exact-match); CONCEPTUAL prefers vector.
+    assert factual["kw"] > factual["vec"]
+    assert conceptual["vec"] > conceptual["kw"]
+    # NAVIGATIONAL is the most extreme keyword preference (code tokens).
+    assert nav["kw"] > factual["kw"]
+    assert nav["vec"] < factual["vec"]
+
+
+def test_intent_neutral_is_identity():
+    """NEUTRAL fallback should be exact 1.0 across both channels — any
+    other value would silently rescale every NEUTRAL question."""
+    assert INTENT_NEUTRAL == {"vec": 1.0, "kw": 1.0}
+
+
+@pytest.mark.parametrize("query,expected", [
+    # FACTUAL — Wh-words, "remember", "preference for"
+    ("What was my favorite restaurant?", "FACTUAL"),
+    ("which color did I pick", "FACTUAL"),
+    ("when did we last meet", "FACTUAL"),
+    ("remind me what I said about Tom", "FACTUAL"),
+    ("decision about the new gym", "FACTUAL"),
+    # CONCEPTUAL — explanatory verbs
+    ("how does the search ranker actually work", "CONCEPTUAL"),
+    ("explain why the test failed", "CONCEPTUAL"),
+    ("why does it crash on startup", "CONCEPTUAL"),
+    ("describe the architecture", "CONCEPTUAL"),
+    # NAVIGATIONAL — code-like tokens
+    ("look up 5f3a92c4-8d1e-4a09-b0a2-8e0c4d5f6a7b", "NAVIGATIONAL"),
+    ("what does foo_bar do", "NAVIGATIONAL"),
+    ("read /etc/hosts", "NAVIGATIONAL"),
+    ("inspect module.submodule", "NAVIGATIONAL"),
+    # NEUTRAL — falls through to none of the buckets
+    ("plan a meal", "NEUTRAL"),
+    ("List items", "NEUTRAL"),
+])
+def test_classify_lme_intent_buckets(query: str, expected: str):
+    assert classify_lme_intent(query) == expected
+
+
+def test_classify_lme_intent_priority_navigational_beats_factual():
+    """A query containing BOTH a code token and a Wh-word should route
+    as NAVIGATIONAL — the code token is the stronger signal for
+    keyword-channel preference."""
+    q = "what does foo_bar mean in this context"  # has 'what' AND foo_bar
+    assert classify_lme_intent(q) == "NAVIGATIONAL"
+
+
+def test_classify_lme_intent_priority_conceptual_beats_factual():
+    """A query containing a 'how does' phrase AND a 'what was' phrase
+    should route as CONCEPTUAL — explanation is the dominant intent."""
+    q = "how does this work and what was the trigger"
+    assert classify_lme_intent(q) == "CONCEPTUAL"
+
+
+def test_classify_lme_intent_empty_returns_neutral():
+    assert classify_lme_intent("") == "NEUTRAL"
+    assert classify_lme_intent("   ") == "NEUTRAL"
+    assert classify_lme_intent(None) == "NEUTRAL"  # type: ignore[arg-type]
+
+
+def test_channel_weights_composition_is_multiplicative():
+    """``channel_weights(cat, intent) == profile[cat] * overlay[intent]``
+    — verifying with a hand-computed pair so a typo in either dict gets
+    caught."""
+    vec, kw = channel_weights("knowledge-update", "FACTUAL")
+    # KU: vec=0.8, kw=1.4 ; FACTUAL: vec=0.3, kw=1.65
+    assert abs(vec - 0.8 * 0.3) < 1e-9
+    assert abs(kw - 1.4 * 1.65) < 1e-9
+
+
+def test_channel_weights_neutral_intent_is_profile_only():
+    """With NEUTRAL intent, weights == profile (overlay is 1.0×)."""
+    for cat, prof in RETRIEVAL_PROFILES.items():
+        vec, kw = channel_weights(cat, "NEUTRAL")
+        assert abs(vec - prof["vec"]) < 1e-9
+        assert abs(kw - prof["kw"]) < 1e-9
+
+
+def test_channel_weights_unknown_category_falls_back_to_ss_user():
+    """Defensive fallback: an unknown category shouldn't crash. SS-user
+    is the safest default since OMEGA's recipe gives it neutral-ish
+    weights (vec=1.0, kw=1.15)."""
+    vec, kw = channel_weights("not-a-real-category", "NEUTRAL")
+    expected = RETRIEVAL_PROFILES["single-session-user"]
+    assert vec == expected["vec"]
+    assert kw == expected["kw"]
+
+
+def test_channel_weights_unknown_intent_falls_back_to_neutral():
+    """Defensive fallback: an unknown intent is treated as NEUTRAL."""
+    vec, kw = channel_weights("knowledge-update", "WEIRD_BUCKET")
+    prof = RETRIEVAL_PROFILES["knowledge-update"]
+    assert vec == prof["vec"]
+    assert kw == prof["kw"]
 
 
 # ── End-to-end accuracy gate on oracle ────────────────────────────────

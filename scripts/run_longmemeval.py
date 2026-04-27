@@ -50,7 +50,9 @@ from scripts.longmemeval.classifier import (  # noqa: E402
     COUNTING_K_FLOOR,
     FILTER_CONFIG,
     K_FLOORS,
+    channel_weights,
     classify,
+    classify_lme_intent,
     is_counting_question,
 )
 from scripts.longmemeval.prompts import (  # noqa: E402
@@ -597,6 +599,68 @@ def ingest_question_haystack(
 # ── Retrieval (OMEGA's triple fan-out + classifier-driven K) ──────────
 
 
+def lme_weighted_rerank(
+    candidates: list[dict],
+    *,
+    pure_vec_hits: list[dict],
+    pure_kw_hits: list[Any],
+    vec_weight: float,
+    kw_weight: float,
+    fallback_weight: float = 0.5,
+    rrf_k: int = 60,
+) -> list[dict]:
+    """OMEGA-style channel-weighted RRF rerank.
+
+    Score each candidate by its rank in three sources:
+      1. Pure vector channel (weight = ``vec_weight``)
+      2. Pure keyword channel (weight = ``kw_weight``)
+      3. The original fused list (weight = ``fallback_weight``)
+
+    A hit's score is the sum of ``weight / (rank + rrf_k)`` over the
+    sources where it appears. Candidates not in any source get 0.0 and
+    sort to the bottom. The list is mutated in-place (each hit gets
+    ``_lme_weighted_score`` set) and returned sorted descending.
+
+    ``pure_vec_hits`` items are dicts with ``uuid`` or ``id`` keys.
+    ``pure_kw_hits`` items are :class:`jarvis_memory.search.keyword.Hit`
+    (objects with ``.id``) — keyword search returns these directly.
+    """
+    vec_rank: dict[str, int] = {}
+    for r, h in enumerate(pure_vec_hits):
+        hid = h.get("uuid") or h.get("id")
+        if hid is not None and hid not in vec_rank:
+            vec_rank[hid] = r
+
+    kw_rank: dict[str, int] = {}
+    for r, h in enumerate(pure_kw_hits):
+        hid = getattr(h, "id", None)
+        if hid is not None and hid not in kw_rank:
+            kw_rank[hid] = r
+
+    composite_rank: dict[str, int] = {}
+    for r, h in enumerate(candidates):
+        hid = h.get("uuid") or h.get("id")
+        if hid is not None and hid not in composite_rank:
+            composite_rank[hid] = r
+
+    for h in candidates:
+        hid = h.get("uuid") or h.get("id")
+        if hid is None:
+            h["_lme_weighted_score"] = 0.0
+            continue
+        s = 0.0
+        if hid in vec_rank:
+            s += vec_weight / (vec_rank[hid] + rrf_k)
+        if hid in kw_rank:
+            s += kw_weight / (kw_rank[hid] + rrf_k)
+        if hid in composite_rank:
+            s += fallback_weight / (composite_rank[hid] + rrf_k)
+        h["_lme_weighted_score"] = s
+
+    candidates.sort(key=lambda h: h.get("_lme_weighted_score", 0.0), reverse=True)
+    return candidates
+
+
 def retrieve_with_omega_recipe(
     *,
     query: str,
@@ -686,13 +750,51 @@ def retrieve_with_omega_recipe(
             primary.append(h)
             seen_ids.add(hid)
 
+    # Stage 1.5: OMEGA-style channel re-weighting. ``scored_search`` fuses
+    # vec/keyword with EQUAL weights via RRF; OMEGA's recipe applies
+    # per-category × per-intent multipliers BEFORE fusion (e.g. KU prefers
+    # keyword 1.4× vector 0.8×, NAVIGATIONAL slams keyword 2.0× vector
+    # 0.1×). We can't unwind scored_search's internal RRF, so we run pure
+    # vector + pure keyword side-by-side at higher recall to get clean
+    # per-channel rank positions, then re-score every candidate by
+    # weighted-RRF and re-sort. Hits found only via expansion/PPR (not in
+    # either pure channel) keep their position via a small fallback term
+    # on the existing fused rank — preserves OMEGA's "triple fan-out" idea
+    # while letting the channel weights actually bite.
+    intent = classify_lme_intent(query)
+    vec_w, kw_w = channel_weights(category, intent)
+
+    # Per-channel pure ranks at higher recall depth (k * 2) so re-rank has
+    # signal beyond the cutoff.
+    pool_n = max(k * 2, 60)
+    pure_vec = _vector_search_fn(query, pool_n)
+    try:
+        from jarvis_memory.search.keyword import keyword_search
+        pure_kw = keyword_search(
+            query=query,
+            k=pool_n,
+            namespace=LME_NEO4J_LABEL,
+            driver=driver,
+            include_pages=False,  # LME has no pages — only episode hits matter
+        )
+    except Exception:
+        # Keyword channel unreachable (Neo4j hiccup, fulltext-index miss,
+        # whatever) → fall back to weighted vector only. Better than crashing.
+        pure_kw = []
+
+    primary = lme_weighted_rerank(
+        primary,
+        pure_vec_hits=pure_vec,
+        pure_kw_hits=pure_kw,
+        vec_weight=vec_w,
+        kw_weight=kw_w,
+    )
+
     # Apply OMEGA's adaptive filter (per-category min_rel / min_res / max_res).
     cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
     min_rel = float(cfg["min_rel"])
     min_res = int(cfg["min_res"])
     max_res = int(cfg["max_res"])
-
-    primary.sort(key=_hit_score, reverse=True)
 
     # Keep top max_res; ensure at least min_res survive even if scores
     # are all below min_rel — better noisy context than empty.
@@ -826,6 +928,9 @@ def run_one_question(
     max_tokens = 1024
     abstention_fired = False
     total_line_appended = False
+    # Stage 1.5 defaults — populated after classification succeeds.
+    lme_intent = "NEUTRAL"
+    lme_channel_weights: tuple[float, float] = (1.0, 1.0)
 
     t0 = time.time()
     try:
@@ -847,6 +952,13 @@ def run_one_question(
 
         cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
         max_tokens = int(cfg["max_tokens"])
+
+        # Stage 1.5: capture intent + channel weights so they show up in
+        # the JSONL row alongside category. Recomputed inside
+        # ``retrieve_with_omega_recipe`` (cheap regex scan); the duplicate
+        # call avoids threading another return value through the function.
+        lme_intent = classify_lme_intent(question)
+        lme_channel_weights = channel_weights(category, lme_intent)
 
         # 1. Ingest haystack into isolated namespace.
         n_sessions = ingest_question_haystack(
@@ -954,6 +1066,11 @@ def run_one_question(
             "shadow_classifier_label": shadow_classifier_label,
             "classifier_rule": classifier_rule,
             "counting": counting,
+            "lme_intent": lme_intent,
+            "lme_channel_weights": [
+                round(lme_channel_weights[0], 3),
+                round(lme_channel_weights[1], 3),
+            ],
             "n_sessions_ingested": n_sessions,
             "n_hits_used": len(hits),
             "n_hits_pre_trim": n_hits_pre_trim,
@@ -984,6 +1101,11 @@ def run_one_question(
             "shadow_classifier_label": shadow_classifier_label,
             "classifier_rule": classifier_rule,
             "counting": counting,
+            "lme_intent": lme_intent,
+            "lme_channel_weights": [
+                round(lme_channel_weights[0], 3),
+                round(lme_channel_weights[1], 3),
+            ],
             "n_sessions_ingested": n_sessions,
             "n_hits_used": len(hits),
             "n_hits_pre_trim": n_hits_pre_trim,

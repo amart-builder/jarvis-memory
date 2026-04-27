@@ -1049,10 +1049,14 @@ def test_run_one_question_error_row_carries_stage1_fields(monkeypatch):
     )
     assert row["error"]
     # All Stage 1 + earlier observability fields must be present.
+    # Stage 1.5: lme_intent + lme_channel_weights also covered — guards
+    # the defensive defaults at the top of run_one_question against
+    # accidental removal.
     for f in ("n_sessions_ingested", "n_hits_used", "n_hits_pre_trim",
               "top_score", "abstention_fired", "max_tokens",
               "category_source", "shadow_classifier_label", "classifier_rule",
-              "counting", "seed_honored"):
+              "counting", "seed_honored",
+              "lme_intent", "lme_channel_weights"):
         assert f in row, f"error row missing field {f!r}"
     assert row["n_hits_pre_trim"] == 2  # retrieval succeeded before crash
     assert row["n_sessions_ingested"] == 2
@@ -1146,3 +1150,161 @@ def test_run_one_question_oracle_category_survives_generation_crash(monkeypatch)
     assert row["error"]
     assert row["predicted_category"] == "temporal-reasoning"
     assert row["category_source"] == "oracle"
+
+
+# ── Stage 1.5 — lme_weighted_rerank (channel × intent multipliers) ────
+
+
+class _FakeKwHit:
+    """Mimics jarvis_memory.search.keyword.Hit — only ``id`` matters."""
+    def __init__(self, hid: str):
+        self.id = hid
+
+
+def _hit(hid: str) -> dict:
+    return {"uuid": hid, "id": hid, "content": "", "similarity": 0.5}
+
+
+def test_lme_weighted_rerank_keyword_dominant_promotes_kw_winner():
+    """With kw_weight >> vec_weight (FACTUAL/KU intent), the candidate
+    that ranks #1 in the keyword channel should sort to the top, even
+    if it ranks last in the vector channel."""
+    from scripts.run_longmemeval import lme_weighted_rerank
+
+    a, b, c = _hit("a"), _hit("b"), _hit("c")
+    candidates = [a, b, c]  # composite order: a, b, c
+    pure_vec = [a, b, c]    # vec rank: a=0, b=1, c=2
+    pure_kw = [_FakeKwHit("c"), _FakeKwHit("b"), _FakeKwHit("a")]  # kw: c=0, b=1, a=2
+
+    out = lme_weighted_rerank(
+        candidates,
+        pure_vec_hits=pure_vec,
+        pure_kw_hits=pure_kw,
+        vec_weight=0.3, kw_weight=2.0,  # FACTUAL-style: kw wins
+    )
+    assert [h["id"] for h in out] == ["c", "b", "a"]
+
+
+def test_lme_weighted_rerank_vector_dominant_promotes_vec_winner():
+    """With vec_weight >> kw_weight (CONCEPTUAL intent), vector top-rank
+    wins even if it's mid-pack on keyword."""
+    from scripts.run_longmemeval import lme_weighted_rerank
+
+    a, b, c = _hit("a"), _hit("b"), _hit("c")
+    candidates = [a, b, c]
+    pure_vec = [c, b, a]    # vec rank: c=0, b=1, a=2
+    pure_kw = [a, b, c]     # kw rank: a=0, b=1, c=2  (using dicts since helper accepts both)
+
+    out = lme_weighted_rerank(
+        candidates,
+        pure_vec_hits=pure_vec,
+        pure_kw_hits=[_FakeKwHit("a"), _FakeKwHit("b"), _FakeKwHit("c")],
+        vec_weight=2.0, kw_weight=0.4,  # CONCEPTUAL: vec wins
+    )
+    assert [h["id"] for h in out] == ["c", "b", "a"]
+
+
+def test_lme_weighted_rerank_fallback_keeps_expansion_only_hits():
+    """A hit found ONLY in the composite list (e.g. via PPR or expansion)
+    still gets the fallback term — it should sort below pure-channel
+    winners but above hits with no signal at all."""
+    from scripts.run_longmemeval import lme_weighted_rerank
+
+    expansion_only = _hit("e")
+    pure_vec = [_hit("a"), _hit("b")]  # a, b in vec channel
+    pure_kw = [_FakeKwHit("a"), _FakeKwHit("b")]
+    candidates = [_hit("a"), _hit("b"), expansion_only]
+
+    out = lme_weighted_rerank(
+        candidates,
+        pure_vec_hits=pure_vec,
+        pure_kw_hits=pure_kw,
+        vec_weight=1.0, kw_weight=1.0,
+        fallback_weight=0.5,
+    )
+    # Pure-channel hits sort above the expansion-only hit.
+    assert out[-1]["id"] == "e"
+    # Expansion-only hit got a non-zero score from the fallback term.
+    assert out[-1]["_lme_weighted_score"] > 0.0
+
+
+def test_lme_weighted_rerank_score_formula_matches_hand_compute():
+    """Pin the exact formula. Hand-computed scores let us catch any
+    silent change to the RRF constant or the channel composition."""
+    from scripts.run_longmemeval import lme_weighted_rerank
+
+    a = _hit("a")
+    out = lme_weighted_rerank(
+        [a],
+        pure_vec_hits=[a],         # vec rank 0
+        pure_kw_hits=[_FakeKwHit("a")],  # kw rank 0
+        vec_weight=1.0, kw_weight=2.0,
+        fallback_weight=0.5,
+        rrf_k=60,
+    )
+    # composite_rank("a") = 0
+    # score = 1.0/(0+60) + 2.0/(0+60) + 0.5/(0+60) = 3.5/60
+    assert abs(out[0]["_lme_weighted_score"] - 3.5 / 60) < 1e-12
+
+
+def test_lme_weighted_rerank_unknown_id_scores_zero():
+    """A candidate whose id is None gets 0.0 — sorts to the bottom."""
+    from scripts.run_longmemeval import lme_weighted_rerank
+
+    bad = {"content": ""}  # no uuid, no id
+    good = _hit("g")
+    out = lme_weighted_rerank(
+        [bad, good],
+        pure_vec_hits=[good],
+        pure_kw_hits=[_FakeKwHit("g")],
+        vec_weight=1.0, kw_weight=1.0,
+    )
+    assert out[0]["id"] == "g"
+    assert out[1]["_lme_weighted_score"] == 0.0
+
+
+def test_lme_weighted_rerank_empty_candidates_is_noop():
+    from scripts.run_longmemeval import lme_weighted_rerank
+    out = lme_weighted_rerank(
+        [],
+        pure_vec_hits=[_hit("x")],
+        pure_kw_hits=[_FakeKwHit("x")],
+        vec_weight=1.0, kw_weight=1.0,
+    )
+    assert out == []
+
+
+def test_lme_weighted_rerank_empty_keyword_channel_falls_back_to_vec():
+    """When keyword search returns nothing (e.g. Neo4j hiccup), the
+    rerank should still order candidates by vec + composite contributions
+    — no crash, no NaN."""
+    from scripts.run_longmemeval import lme_weighted_rerank
+
+    a, b = _hit("a"), _hit("b")
+    out = lme_weighted_rerank(
+        [a, b],
+        pure_vec_hits=[a, b],
+        pure_kw_hits=[],  # keyword channel down
+        vec_weight=1.0, kw_weight=2.0,
+    )
+    assert [h["id"] for h in out] == ["a", "b"]
+    assert all(h["_lme_weighted_score"] > 0 for h in out)
+
+
+def test_lme_weighted_rerank_dedupes_repeat_ids_in_channels():
+    """If a channel emits the same id twice (shouldn't happen in
+    practice, but defensive): use the FIRST (best) rank, not the
+    last."""
+    from scripts.run_longmemeval import lme_weighted_rerank
+
+    a, b = _hit("a"), _hit("b")
+    out = lme_weighted_rerank(
+        [a, b],
+        pure_vec_hits=[a, b, a],  # 'a' appears at rank 0 and rank 2
+        pure_kw_hits=[],
+        vec_weight=1.0, kw_weight=1.0,
+    )
+    # 'a' should keep rank 0 (better), so its score uses 1/(0+60).
+    a_score = next(h["_lme_weighted_score"] for h in out if h["id"] == "a")
+    expected = 1.0 / (0 + 60) + 0.5 / (0 + 60)  # vec + composite
+    assert abs(a_score - expected) < 1e-12

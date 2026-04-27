@@ -337,3 +337,108 @@ ABSTENTION_FILTER: dict[str, float | int] = {
 # trim is a no-op for every category.
 CONTEXT_BUDGET_CHARS: dict[str, int] = {}
 CONTEXT_BUDGET_MIN_HITS: int = 3
+
+
+# ── Stage 1.5 (OMEGA retrieval profile + intent overlay) ──────────────
+#
+# OMEGA's adapter applies per-category MULTIPLIERS to the rank-position
+# of each retrieval channel before fusing them. Different question types
+# benefit from different ratios of vector-search vs keyword-search:
+#
+#   - knowledge-update: exact name lookups → keyword wins
+#   - multi-session: broad semantic matching → vector wins
+#   - temporal-reasoning: date strings + named events → keyword wins
+#
+# OMEGA distinguishes "text" (Neo4j keyword) from "word" (Neo4j fulltext)
+# as separate channels. Our stack collapses these into a single keyword
+# channel via :func:`jarvis_memory.search.keyword.keyword_search`, so we
+# average OMEGA's text/word weights into a single ``kw`` weight here:
+#   kw = (omega_text + omega_word) / 2
+RETRIEVAL_PROFILES: dict[str, dict[str, float]] = {
+    "single-session-assistant":  {"vec": 1.0, "kw": 1.0},   # OMEGA text=1.0,word=1.0
+    "single-session-user":       {"vec": 1.0, "kw": 1.15},  # OMEGA text=1.1,word=1.2
+    "knowledge-update":          {"vec": 0.8, "kw": 1.4},   # OMEGA text=1.3,word=1.5
+    "single-session-preference": {"vec": 0.8, "kw": 1.25},  # OMEGA text=1.0,word=1.5
+    "multi-session":             {"vec": 1.3, "kw": 1.15},  # OMEGA text=1.0,word=1.3
+    "temporal-reasoning":        {"vec": 1.0, "kw": 1.3},   # OMEGA text=1.3,word=1.3
+}
+
+# Intent overlay — multipliers applied ON TOP of the category profile
+# based on question PHRASING. OMEGA detects intent by substring/regex
+# on the question text. Three disjoint buckets — first match wins,
+# fallback is NEUTRAL (1.0× across both channels).
+INTENT_NEUTRAL: dict[str, float] = {"vec": 1.0, "kw": 1.0}
+INTENT_OVERLAYS: dict[str, dict[str, float]] = {
+    "FACTUAL":      {"vec": 0.3, "kw": 1.65},  # OMEGA text=1.5,word=1.8
+    "CONCEPTUAL":   {"vec": 1.8, "kw": 0.4},   # OMEGA text=0.5,word=0.3
+    "NAVIGATIONAL": {"vec": 0.1, "kw": 2.0},   # OMEGA text=2.0,word=2.0
+}
+
+# Patterns for substring-based intent detection. Anchored to lowercase
+# query text. Order matters at the call site (NAVIGATIONAL first via
+# regex, then CONCEPTUAL via verb cues, then FACTUAL via Wh-words).
+_FACTUAL_PHRASES: tuple[str, ...] = (
+    "what was", "what is", "what are", "what's",
+    "which", "when did", "when was", "when were",
+    "who ", "where ", "did we", "did i ",
+    "decision about", "preference for",
+    "remind me", "remember when", "remember that",
+)
+_CONCEPTUAL_PHRASES: tuple[str, ...] = (
+    "how does", "how do ", "how to ",
+    "why does", "why do ", "why is ", "why are ",
+    "explain", "understand", "architecture",
+    "pattern", "approach", "strategy",
+)
+# A "code-token" — UUID, file-path, dotted ID, or snake_case identifier
+# that wouldn't appear in normal prose. Tight regex to avoid false-firing
+# on punctuation in regular sentences.
+_NAVIGATIONAL_TOKEN_RE = re.compile(
+    r"\b("
+    r"[0-9a-f]{8,}-[0-9a-f]{4,}|"             # uuid-like
+    r"/[A-Za-z0-9_./-]+|"                      # path
+    r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|"       # dotted id
+    r"[a-z][a-z0-9]*_[a-z][a-z0-9_]*"          # snake_case
+    r")\b"
+)
+
+
+def classify_lme_intent(query: str) -> str:
+    """OMEGA-style intent bucket for a LongMemEval question.
+
+    Returns one of ``"FACTUAL"``, ``"CONCEPTUAL"``, ``"NAVIGATIONAL"``,
+    or ``"NEUTRAL"``. Used by the LongMemEval adapter to overlay
+    channel-weight multipliers on top of the per-category profile —
+    the published OMEGA recipe.
+
+    Decision order (first match wins):
+      1. Code-tokens (uuids, paths, identifiers) → NAVIGATIONAL
+      2. "how does/do/to", "why", "explain", etc. → CONCEPTUAL
+      3. "what was/is/are", Wh-words, "remind me" → FACTUAL
+      4. Otherwise → NEUTRAL
+    """
+    q = (query or "").lower()
+    if not q.strip():
+        return "NEUTRAL"
+    if _NAVIGATIONAL_TOKEN_RE.search(q):
+        return "NAVIGATIONAL"
+    if any(p in q for p in _CONCEPTUAL_PHRASES):
+        return "CONCEPTUAL"
+    if any(p in q for p in _FACTUAL_PHRASES):
+        return "FACTUAL"
+    return "NEUTRAL"
+
+
+def channel_weights(category: str, intent: str) -> tuple[float, float]:
+    """Combine the per-category retrieval profile with the intent overlay.
+
+    Returns ``(vec_weight, kw_weight)`` — the multipliers to apply to
+    each channel's reciprocal-rank score before fusion. Multiplicative
+    composition matches OMEGA: ``profile[ch] * overlay[ch]``.
+
+    Falls back to a neutral profile (single-session-user) when category
+    is unknown, and a neutral overlay when intent is NEUTRAL.
+    """
+    profile = RETRIEVAL_PROFILES.get(category, RETRIEVAL_PROFILES["single-session-user"])
+    overlay = INTENT_OVERLAYS.get(intent, INTENT_NEUTRAL)
+    return (profile["vec"] * overlay["vec"], profile["kw"] * overlay["kw"])
