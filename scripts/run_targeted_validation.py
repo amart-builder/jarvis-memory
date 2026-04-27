@@ -44,6 +44,7 @@ _DEFAULT_BASELINE_EVAL = Path("runs/lme_gpt41_v1.1.jsonl.eval-results-gpt-4o")
 _DEFAULT_DATASET = Path("data/longmemeval/longmemeval_s_cleaned.json")
 _DEFAULT_ORACLE = Path("data/longmemeval/longmemeval_oracle.json")
 _DEFAULT_JUDGE_SCRIPT = Path("/tmp/lme-official/src/evaluation/evaluate_qa.py")
+_PARALLEL_JUDGE_SCRIPT = Path("scripts/run_parallel_judge.py")
 _DEFAULT_JUDGE_MODEL = "gpt-4o"
 _DEFAULT_REGRESSION_SAMPLE = 30
 _DEFAULT_SEED = 42
@@ -129,8 +130,15 @@ def run_judge(*,
               judge_script: Path,
               judge_model: str,
               hyp_jsonl: Path,
-              oracle_path: Path) -> int:
-    """Invoke the official LongMemEval judge."""
+              oracle_path: Path,
+              parallel: bool = False,
+              workers: int = 8) -> int:
+    """Invoke the LongMemEval judge.
+
+    ``parallel=True`` uses ``scripts/run_parallel_judge.py`` (drop-in
+    same CLI + output format as the official judge, but uses a
+    ThreadPoolExecutor for ~5-8× faster turnaround on big runs).
+    """
     cmd = [
         sys.executable,
         str(judge_script),
@@ -138,6 +146,8 @@ def run_judge(*,
         str(hyp_jsonl),
         str(oracle_path),
     ]
+    if parallel:
+        cmd.extend(["--workers", str(workers), "--quiet"])
     print(f"\n→ Running judge: {' '.join(cmd)}\n")
     return subprocess.call(cmd)
 
@@ -228,6 +238,12 @@ def main() -> int:
                         help="Oracle JSON for judge ground truth.")
     parser.add_argument("--judge-script", type=Path, default=_DEFAULT_JUDGE_SCRIPT,
                         help="Path to the LongMemEval evaluate_qa.py script.")
+    parser.add_argument("--parallel-judge", action="store_true",
+                        help="Use the parallel judge wrapper instead of the official "
+                             "sequential judge. Same output format; ~5-8× faster on big runs. "
+                             "Stateless OpenAI calls — provably safe per Alex's parallelism rule.")
+    parser.add_argument("--judge-workers", type=int, default=8,
+                        help="Concurrent judge workers when --parallel-judge is set (default 8).")
     parser.add_argument("--judge-model", type=str, default=_DEFAULT_JUDGE_MODEL,
                         help="Judge model id (default: gpt-4o; the published baseline).")
     parser.add_argument("--answerer", type=str, default="gpt41",
@@ -310,11 +326,16 @@ def main() -> int:
 
         # Judge the new output. The judge writes results next to the
         # input file as <input>.eval-results-<model>.
+        judge_script = (
+            _PARALLEL_JUDGE_SCRIPT if args.parallel_judge else args.judge_script
+        )
         rc = run_judge(
-            judge_script=args.judge_script,
+            judge_script=judge_script,
             judge_model=args.judge_model,
             hyp_jsonl=args.output,
             oracle_path=args.oracle,
+            parallel=args.parallel_judge,
+            workers=args.judge_workers,
         )
         if rc != 0:
             print(f"ERROR: judge exited with code {rc}", file=sys.stderr)
