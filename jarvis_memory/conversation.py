@@ -339,6 +339,7 @@ class EpisodeRecorder:
         episode_type: Optional[str] = None,
         group_id: Optional[str] = None,
         importance: float = 0.8,
+        agent_id: Optional[str] = None,
         ctx=None,  # Run 4: OperationContext | None — see EOF trust-boundary block.
     ) -> Optional[str]:
         """Record a conversation episode.
@@ -349,6 +350,12 @@ class EpisodeRecorder:
             episode_type: Memory type. Auto-classified if not provided.
             group_id: Project group. Inherited from session if not provided.
             importance: Importance score (0-1).
+            agent_id: Logical writer identity (``"claude-code"`` /
+                ``"openclaw"`` / ``"cron"`` / ``"hooks"`` / etc.). When
+                None, derived from ``ctx`` (mcp→claude-code,
+                rest→openclaw, cli→cli) or stored as ``"unknown"``.
+                Used for "which system wrote this?" filtering and
+                cross-system debugging.
             ctx: Optional OperationContext (Run 4 trust boundary). When the
                 caller provides a ``ctx`` with ``remote=True`` and the
                 content trips an abuse heuristic, a WARNING is logged.
@@ -407,6 +414,21 @@ class EpisodeRecorder:
                     record = result.single()
                     group_id = record["gid"] if record else "unknown"
 
+                # Resolve agent_id: explicit > ctx-derived > "unknown".
+                # Per-surface defaults: mcp→claude-code (the dominant MCP
+                # client today), rest→openclaw, cli→cli. Callers that want
+                # something specific should pass it explicitly.
+                resolved_agent_id = agent_id
+                if resolved_agent_id is None and ctx is not None:
+                    src = getattr(ctx, "source", None)
+                    resolved_agent_id = {
+                        "mcp": "claude-code",
+                        "rest": "openclaw",
+                        "cli": "cli",
+                    }.get(src)
+                if resolved_agent_id is None:
+                    resolved_agent_id = "unknown"
+
                 # Create the episode node
                 db.run(
                     """
@@ -414,16 +436,19 @@ class EpisodeRecorder:
                         uuid: $uuid,
                         session_id: $session_id,
                         group_id: $group_id,
+                        agent_id: $agent_id,
                         content: $content,
                         episode_type: $episode_type,
                         importance: $importance,
                         created_at: datetime($created_at),
+                        t_created: datetime($created_at),
                         access_count: 0
                     })
                     """,
                     uuid=episode_id,
                     session_id=session_id,
                     group_id=group_id,
+                    agent_id=resolved_agent_id,
                     content=content,
                     episode_type=episode_type,
                     importance=importance,
