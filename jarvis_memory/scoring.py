@@ -392,6 +392,28 @@ def scored_search(
                 for k, md in variant_meta.items():
                     vector_meta.setdefault(k, md)
 
+    # PPR (multi-hop) channel — fires only when the intent classifier
+    # flags a relationship query (≥2 entities or causal/associative
+    # language). Single-entity factoid queries don't benefit from
+    # graph propagation; the bi-encoder + keyword retrievers nail
+    # those already. PPR fail-opens via empty list so the channel
+    # is invisible when the graph can't be loaded.
+    if intent == "multi_hop" and driver is not None:
+        try:
+            from .search.ppr import personalized_pagerank
+
+            ppr_hits = personalized_pagerank(
+                query,
+                driver=driver,
+                namespace=namespace,
+                limit=max(limit * 5, 30),
+            )
+        except Exception as e:  # noqa: BLE001 — PPR is optional
+            logger.debug("personalized_pagerank failed (%s); continuing without it", e)
+            ppr_hits = []
+        if ppr_hits:
+            rankings.append([uid for uid, _ in ppr_hits])
+
     if not rankings:
         # Nothing retrieved from any channel — fall back to legacy composite
         # so a minimal result set is still produced (keeps API contract behavior).
