@@ -56,6 +56,19 @@ def test_load_done_question_ids_tolerates_bad_line(tmp_path):
     assert load_done_question_ids(p) == {"q1", "q2"}
 
 
+def test_load_done_question_ids_skips_errored_rows(tmp_path):
+    """Errored rows must NOT count as done — they need to be retried."""
+    from scripts.run_longmemeval import load_done_question_ids
+    p = tmp_path / "out.jsonl"
+    p.write_text(
+        json.dumps({"question_id": "q1", "hypothesis": "ok"}) + "\n"
+        + json.dumps({"question_id": "q2", "hypothesis": "", "error": "Traceback..."}) + "\n"
+        + json.dumps({"question_id": "q3", "hypothesis": "ok"}) + "\n"
+    )
+    # q2 was an error row — gets retried, NOT in done.
+    assert load_done_question_ids(p) == {"q1", "q3"}
+
+
 # ── stratified_subset ─────────────────────────────────────────────────
 
 

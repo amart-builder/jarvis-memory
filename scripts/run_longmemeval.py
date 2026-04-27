@@ -139,7 +139,10 @@ def apply_ppr_overrides() -> None:
 
 
 def load_done_question_ids(output_path: Path) -> set[str]:
-    """Read existing JSONL output to find already-answered question_ids."""
+    """Read existing JSONL output to find already-answered question_ids.
+
+    Skips rows with an ``error`` field — those need retry, not skip.
+    """
     if not output_path.exists():
         return set()
     done: set[str] = set()
@@ -150,12 +153,14 @@ def load_done_question_ids(output_path: Path) -> set[str]:
                 continue
             try:
                 row = json.loads(line)
-                qid = row.get("question_id")
-                if qid:
-                    done.add(qid)
             except json.JSONDecodeError:
-                # Tolerate a single bad trailing line, but no further.
                 continue
+            if row.get("error"):
+                # Failed row — skip from "done" set so it gets retried.
+                continue
+            qid = row.get("question_id")
+            if qid:
+                done.add(qid)
     return done
 
 
@@ -210,9 +215,11 @@ def ingest_question_haystack(
         if not content.strip():
             continue
         ref_date = parse_longmemeval_date(raw_date)
-        # Use a unique per-question UUID so retrieval doesn't collide
-        # with another question's same session_id.
-        uid = f"{group_id}__{sid}"
+        # Use a unique per-question UUID. Include the haystack INDEX
+        # because LongMemEval has a few questions (13/500 in s_cleaned)
+        # where the same session_id appears twice in haystack_session_ids
+        # — Chroma rejects upserts with duplicate IDs in one batch.
+        uid = f"{group_id}__{i:03d}_{sid}"
 
         with driver.session() as db:
             db.run(
