@@ -90,6 +90,9 @@ LME_AGENT_ID: str = "benchmark-longmemeval"
 # Phase 6 baseline behavior is preserved unless this is explicitly on.
 LME_OBSERVATIONS_ENABLED: bool = os.getenv("JARVIS_LME_OBSERVATIONS", "0") == "1"
 LME_OBSERVATION_TOP_K: int = int(os.getenv("JARVIS_LME_OBSERVATION_TOP_K", "10"))
+# When set, extractions are cached in this SQLite DB — re-runs hit the
+# cache instead of re-calling gpt-4o-mini. Empty/unset → no caching.
+LME_EXTRACTION_CACHE_PATH: str = os.getenv("JARVIS_LME_EXTRACTION_CACHE_PATH", "").strip()
 
 DEFAULT_DATASET: Path = Path("data/longmemeval/longmemeval_s_cleaned.json")
 DEFAULT_ORACLE: Path = Path("data/longmemeval/longmemeval_oracle.json")
@@ -725,7 +728,10 @@ def ingest_observations(
 
     Returns the count of observation nodes created.
     """
-    from scripts.longmemeval.extract import extract_observations_batch
+    from scripts.longmemeval.extract import (
+        ExtractionCache,
+        extract_observations_batch,
+    )
 
     # Wipe any prior observations for this group_id (idempotent re-runs).
     with driver.session() as db:
@@ -740,7 +746,23 @@ def ingest_observations(
     for uid, doc, meta in zip(episode_ids, episode_docs, episode_metas):
         sessions.append((uid, doc, meta.get("referenced_date", "")))
 
-    obs_by_episode = extract_observations_batch(sessions=sessions, max_workers=4)
+    # Optional extraction cache. Identical inputs → identical observations,
+    # so a cache hit is byte-for-byte equivalent to re-running OpenAI.
+    cache = None
+    if LME_EXTRACTION_CACHE_PATH:
+        try:
+            cache = ExtractionCache(LME_EXTRACTION_CACHE_PATH)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not open extraction cache at %s: %s",
+                           LME_EXTRACTION_CACHE_PATH, e)
+            cache = None
+
+    obs_by_episode = extract_observations_batch(
+        sessions=sessions, max_workers=4, cache=cache,
+    )
+
+    if cache is not None:
+        logger.info("ingest_observations: %s", cache.stats_summary())
 
     n_obs = 0
     obs_ids: list[str] = []

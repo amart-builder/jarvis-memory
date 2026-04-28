@@ -314,3 +314,328 @@ class TestExtractObservationsBatch:
             client=client,
         )
         assert out == {"sess_x": []}
+
+
+# ── ExtractionCache (sqlite) ────────────────────────────────────────────
+
+
+class TestExtractionCache:
+    def _new_cache(self, tmp_path):
+        from scripts.longmemeval.extract import ExtractionCache
+        return ExtractionCache(tmp_path / "cache.db")
+
+    def test_init_creates_db(self, tmp_path):
+        cache = self._new_cache(tmp_path)
+        assert (tmp_path / "cache.db").exists()
+        # Empty cache → all misses
+        assert cache.hits == 0
+        assert cache.misses == 0
+
+    def test_make_key_deterministic_and_input_sensitive(self):
+        from scripts.longmemeval.extract import ExtractionCache
+        k1 = ExtractionCache.make_key(
+            session_text="user: hi", session_date="2023-01-01",
+            prompt_version="v1", model="gpt-4o-mini",
+        )
+        k2 = ExtractionCache.make_key(
+            session_text="user: hi", session_date="2023-01-01",
+            prompt_version="v1", model="gpt-4o-mini",
+        )
+        assert k1 == k2  # deterministic
+        # Each input field affects the key
+        for differs in [
+            {"session_text": "user: bye"},
+            {"session_date": "2024-01-01"},
+            {"prompt_version": "v2"},
+            {"model": "gpt-4o"},
+        ]:
+            kw = dict(session_text="user: hi", session_date="2023-01-01",
+                      prompt_version="v1", model="gpt-4o-mini")
+            kw.update(differs)
+            assert ExtractionCache.make_key(**kw) != k1
+
+    def test_get_miss_returns_none(self, tmp_path):
+        cache = self._new_cache(tmp_path)
+        assert cache.get("nonexistent_key") is None
+        assert cache.misses == 1
+        assert cache.hits == 0
+
+    def test_put_then_get_roundtrips_observations(self, tmp_path):
+        from scripts.longmemeval.extract import Observation
+        cache = self._new_cache(tmp_path)
+        observations = [
+            Observation(type="event", key="yoga", value="5th class",
+                        date="2023-06-12", details="vinyasa"),
+            Observation(type="fact", key="age", value="32",
+                        date=None, details=""),
+        ]
+        cache.put(
+            "key1", observations,
+            model="gpt-4o-mini", prompt_version="v1", session_date="2023-06-12",
+        )
+        out = cache.get("key1")
+        assert out is not None
+        assert len(out) == 2
+        assert out[0].type == "event"
+        assert out[0].key == "yoga"
+        assert out[0].value == "5th class"
+        assert out[0].date == "2023-06-12"
+        assert out[0].details == "vinyasa"
+        assert out[1].type == "fact"
+        assert out[1].date is None
+        assert out[1].details == ""
+        assert cache.hits == 1
+
+    def test_extract_observations_uses_cache_on_hit(self, tmp_path):
+        """Cache hit must skip the OpenAI call entirely."""
+        from scripts.longmemeval.extract import (
+            ExtractionCache, Observation, extract_observations,
+        )
+        cache = ExtractionCache(tmp_path / "cache.db")
+        # Pre-populate
+        from scripts.longmemeval.extract import PROMPT_VERSION
+        key = ExtractionCache.make_key(
+            session_text="user: hi", session_date="2023-06-12",
+            prompt_version=PROMPT_VERSION, model="gpt-4o-mini",
+        )
+        cache.put(
+            key,
+            [Observation(type="fact", key="cached", value="yes", date=None, details="")],
+            model="gpt-4o-mini", prompt_version=PROMPT_VERSION,
+            session_date="2023-06-12",
+        )
+
+        client = _FakeOpenAIClient(response_content="SHOULD NOT BE CALLED")
+        obs = extract_observations(
+            session_text="user: hi", session_date="2023-06-12",
+            client=client, model="gpt-4o-mini", cache=cache,
+        )
+        assert len(obs) == 1
+        assert obs[0].key == "cached"
+        assert client.last_kwargs == {}  # never called
+
+    def test_extract_observations_misses_then_writes(self, tmp_path):
+        """Cache miss runs OpenAI, then stores result."""
+        from scripts.longmemeval.extract import (
+            ExtractionCache, extract_observations,
+        )
+        cache = ExtractionCache(tmp_path / "cache.db")
+        client = _FakeOpenAIClient(
+            response_content='{"observations": [{"type": "fact",'
+            ' "key": "from_api", "value": "v", "date": null, "details": ""}]}'
+        )
+        # First call: miss → OpenAI → cache
+        obs1 = extract_observations(
+            session_text="user: hello", session_date="2023-07-01",
+            client=client, model="gpt-4o-mini", cache=cache,
+        )
+        assert len(obs1) == 1
+        assert obs1[0].key == "from_api"
+        assert client.last_kwargs.get("model") == "gpt-4o-mini"
+
+        # Second call with a NEW client that would error if hit:
+        client2 = _FakeOpenAIClient(raise_on_call=True)
+        obs2 = extract_observations(
+            session_text="user: hello", session_date="2023-07-01",
+            client=client2, model="gpt-4o-mini", cache=cache,
+        )
+        assert len(obs2) == 1
+        assert obs2[0].key == "from_api"
+        # Returned observations match byte-for-byte after roundtrip
+        assert obs2[0].to_dict() == obs1[0].to_dict()
+        assert cache.hits == 1
+        assert cache.misses == 1
+
+    def test_different_prompt_versions_dont_collide(self, tmp_path):
+        """Bumping PROMPT_VERSION must invalidate prior cache entries."""
+        from scripts.longmemeval.extract import ExtractionCache
+        cache = ExtractionCache(tmp_path / "cache.db")
+        k_v1 = ExtractionCache.make_key(
+            session_text="x", session_date="2023-01-01",
+            prompt_version="v1", model="gpt-4o-mini",
+        )
+        k_v2 = ExtractionCache.make_key(
+            session_text="x", session_date="2023-01-01",
+            prompt_version="v2", model="gpt-4o-mini",
+        )
+        assert k_v1 != k_v2
+        # Storing under v1 must not satisfy a v2 lookup
+        cache.put(k_v1, [], model="gpt-4o-mini",
+                  prompt_version="v1", session_date="2023-01-01")
+        assert cache.get(k_v2) is None
+
+    def test_batch_uses_cache(self, tmp_path):
+        """Cache propagates through extract_observations_batch."""
+        from scripts.longmemeval.extract import (
+            ExtractionCache, extract_observations_batch,
+        )
+        cache = ExtractionCache(tmp_path / "cache.db")
+        client = _FakeOpenAIClient(
+            response_content='{"observations": [{"type": "fact",'
+            ' "key": "k", "value": "v", "date": null, "details": ""}]}'
+        )
+        sessions = [
+            ("sa", "user: a", "2023-01-01"),
+            ("sb", "user: b", "2023-02-01"),
+        ]
+        # Run 1 — both miss
+        out1 = extract_observations_batch(
+            sessions=sessions, client=client, max_workers=2, cache=cache,
+        )
+        assert cache.misses == 2
+        assert cache.hits == 0
+        assert all(len(out1[s]) == 1 for s in ("sa", "sb"))
+
+        # Run 2 — both hit; OpenAI must NOT be called
+        client2 = _FakeOpenAIClient(raise_on_call=True)
+        out2 = extract_observations_batch(
+            sessions=sessions, client=client2, max_workers=2, cache=cache,
+        )
+        assert cache.hits == 2
+        assert all(len(out2[s]) == 1 for s in ("sa", "sb"))
+        # Returned observations are equivalent
+        for s in ("sa", "sb"):
+            assert out1[s][0].to_dict() == out2[s][0].to_dict()
+
+    def test_corrupt_entry_treated_as_miss(self, tmp_path):
+        """A corrupted JSON value must not crash — fall back to miss."""
+        from scripts.longmemeval.extract import ExtractionCache
+        import sqlite3
+        cache = ExtractionCache(tmp_path / "cache.db")
+        # Inject corrupt row directly
+        with sqlite3.connect(tmp_path / "cache.db") as conn:
+            conn.execute(
+                """INSERT INTO extractions
+                   (cache_key, observations_json, n_observations,
+                    model, prompt_version, session_date)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("bad_key", "{not valid json", 0,
+                 "gpt-4o-mini", "v1", "2023-01-01"),
+            )
+            conn.commit()
+        assert cache.get("bad_key") is None  # treated as miss, no crash
+
+    def test_concurrent_batch_safe(self, tmp_path):
+        """Batch with workers > 1 must not deadlock or corrupt the cache."""
+        from scripts.longmemeval.extract import (
+            ExtractionCache, extract_observations_batch,
+        )
+        cache = ExtractionCache(tmp_path / "cache.db")
+        client = _FakeOpenAIClient(
+            response_content='{"observations": [{"type": "fact",'
+            ' "key": "k", "value": "v", "date": null, "details": ""}]}'
+        )
+        sessions = [(f"s{i}", f"user: msg-{i}", "2023-01-01") for i in range(20)]
+        out = extract_observations_batch(
+            sessions=sessions, client=client, max_workers=4, cache=cache,
+        )
+        assert len(out) == 20
+        assert all(len(v) == 1 for v in out.values())
+        assert cache.misses == 20
+        # Re-run — all 20 should hit
+        out2 = extract_observations_batch(
+            sessions=sessions, client=_FakeOpenAIClient(raise_on_call=True),
+            max_workers=4, cache=cache,
+        )
+        assert len(out2) == 20
+        assert cache.hits == 20
+
+    def test_empty_extraction_is_cached_when_api_succeeds(self, tmp_path):
+        """API-success with zero observations MUST be cached.
+
+        Without this, re-runs hit OpenAI for those sessions, and OpenAI
+        is non-deterministic enough at temperature=0 that a re-call
+        could produce a different result — leaking variance into
+        benchmark scores. This is the load-bearing accuracy claim.
+        """
+        from scripts.longmemeval.extract import ExtractionCache, extract_observations
+        cache = ExtractionCache(tmp_path / "cache.db")
+        client = _FakeOpenAIClient(response_content='{"observations": []}')
+        obs1 = extract_observations(
+            session_text="user: hi only",
+            session_date="2023-01-01",
+            client=client, cache=cache,
+        )
+        assert obs1 == []
+        assert cache.misses == 1
+        # Second call MUST hit cache, not re-call OpenAI
+        client2 = _FakeOpenAIClient(raise_on_call=True)
+        obs2 = extract_observations(
+            session_text="user: hi only",
+            session_date="2023-01-01",
+            client=client2, cache=cache,
+        )
+        assert obs2 == []
+        assert cache.hits == 1
+        assert client2.last_kwargs == {}  # never called
+
+    def test_api_error_is_NOT_cached(self, tmp_path):
+        """API errors should retry on next run, not serve stale-error from cache."""
+        from scripts.longmemeval.extract import ExtractionCache, extract_observations
+        cache = ExtractionCache(tmp_path / "cache.db")
+        # First call: API errors → empty list returned, cache NOT populated
+        client_err = _FakeOpenAIClient(raise_on_call=True)
+        obs_err = extract_observations(
+            session_text="user: x", session_date="2023-01-01",
+            client=client_err, cache=cache,
+        )
+        assert obs_err == []
+        # Cache must be empty — second call must hit OpenAI again
+        client_ok = _FakeOpenAIClient(
+            response_content='{"observations": [{"type": "fact",'
+            ' "key": "from_retry", "value": "v", "date": null, "details": ""}]}'
+        )
+        obs_retry = extract_observations(
+            session_text="user: x", session_date="2023-01-01",
+            client=client_ok, cache=cache,
+        )
+        assert len(obs_retry) == 1
+        assert obs_retry[0].key == "from_retry"
+        # The retry SHOULD have populated the cache
+        assert cache.misses == 2  # both calls were misses
+        assert cache.hits == 0
+
+    def test_cache_put_failure_does_not_break_extraction(self, tmp_path):
+        """If cache.put() raises, extraction must still return observations."""
+        from scripts.longmemeval.extract import ExtractionCache, extract_observations
+
+        class _BrokenCache(ExtractionCache):
+            def put(self, *a, **kw):
+                raise RuntimeError("simulated cache write failure")
+
+        cache = _BrokenCache(tmp_path / "cache.db")
+        client = _FakeOpenAIClient(
+            response_content='{"observations": [{"type": "fact",'
+            ' "key": "k", "value": "v", "date": null, "details": ""}]}'
+        )
+        obs = extract_observations(
+            session_text="user: x", session_date="2023-01-01",
+            client=client, cache=cache,
+        )
+        # Observations still returned even though cache.put() raised
+        assert len(obs) == 1
+        assert obs[0].key == "k"
+
+    def test_observation_field_equality_after_roundtrip(self, tmp_path):
+        """Frozen-dataclass equality should hold after cache roundtrip."""
+        from scripts.longmemeval.extract import (
+            ExtractionCache, extract_observations,
+        )
+        cache = ExtractionCache(tmp_path / "cache.db")
+        client = _FakeOpenAIClient(
+            response_content='{"observations": [{"type": "event",'
+            ' "key": "yoga", "value": "5th class", "date": "2023-06-12",'
+            ' "details": "vinyasa"}]}'
+        )
+        obs1 = extract_observations(
+            session_text="user: did yoga", session_date="2023-06-12",
+            client=client, cache=cache,
+        )
+        # Re-run hits cache
+        obs2 = extract_observations(
+            session_text="user: did yoga", session_date="2023-06-12",
+            client=_FakeOpenAIClient(raise_on_call=True), cache=cache,
+        )
+        # Frozen dataclass equality — every field must match
+        assert obs1 == obs2
+        assert obs1[0] == obs2[0]

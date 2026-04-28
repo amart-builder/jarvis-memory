@@ -28,11 +28,15 @@ Determinism: temperature=0, seed=42, max_tokens capped per session.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import sqlite3
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -47,6 +51,11 @@ _MAX_KEY_LEN = 60
 _MAX_VALUE_LEN = 200
 _MAX_DETAILS_LEN = 80
 _MAX_OBSERVATIONS_PER_SESSION = 30
+
+# Bump when EXTRACTION_PROMPT_TEMPLATE changes in a way that should
+# invalidate cached extractions. The cache key includes this string,
+# so a bump just means future runs miss the cache and re-extract.
+PROMPT_VERSION = "phase8-v1"
 
 
 # OMEGA-style strict prompt — verbatim only, typed, concise.
@@ -121,6 +130,126 @@ class Observation:
         date_part = f" [{self.date}]" if self.date else ""
         details_part = f" — {self.details}" if self.details else ""
         return f"- {self.type}: {self.key} = {self.value}{date_part}{details_part}"
+
+
+class ExtractionCache:
+    """SQLite-backed cache for typed observation extractions.
+
+    Why this exists: Phase 8 makes ~50 gpt-4o-mini calls per question
+    (one per session). At 104q × 50 sessions × ~2-4s/call, that's
+    ~70-150 minutes of API time per run. Cached, the second run drops
+    to ~1-2 min — extraction becomes ~free.
+
+    Cache key = sha256(prompt_version + model + session_date + session_text).
+    Bumping ``PROMPT_VERSION`` invalidates all cached entries naturally.
+
+    Concurrency: WAL mode + connection-per-call lets the 4-worker
+    parallel harness share the cache safely. Each get/put opens a
+    short-lived connection; SQLite's WAL handles concurrent readers
+    plus a single writer at a time.
+    """
+
+    def __init__(self, db_path: Path | str):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._stats_lock = threading.Lock()
+        self._hits = 0
+        self._misses = 0
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        # check_same_thread=False is safe because we never share a single
+        # connection across threads — we open per call. The flag just
+        # silences SQLite's defensive thread-affinity check.
+        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        # Explicit busy timeout — under ~16 concurrent extraction threads
+        # writing small JSON blobs, transient locks are expected. WAL allows
+        # concurrent readers + 1 writer; busy_timeout keeps any second
+        # writer waiting up to 30s instead of raising OperationalError.
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS extractions (
+                    cache_key TEXT PRIMARY KEY,
+                    observations_json TEXT NOT NULL,
+                    n_observations INTEGER NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+
+    @staticmethod
+    def make_key(*, session_text: str, session_date: str,
+                 prompt_version: str, model: str) -> str:
+        """Deterministic SHA-256 over the inputs that affect the extraction."""
+        h = hashlib.sha256()
+        for part in (prompt_version, model, session_date or "", session_text):
+            h.update(part.encode("utf-8"))
+            h.update(b"\x00")
+        return h.hexdigest()
+
+    def get(self, key: str) -> Optional[list["Observation"]]:
+        """Return cached observations as Observation instances, or None on miss."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT observations_json FROM extractions WHERE cache_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            with self._stats_lock:
+                self._misses += 1
+            return None
+        with self._stats_lock:
+            self._hits += 1
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, ValueError):
+            logger.warning("cache: corrupt entry for key=%s; treating as miss", key[:12])
+            return None
+        out: list[Observation] = []
+        for d in payload:
+            obs = _coerce_observation(d) if isinstance(d, dict) else None
+            if obs is not None:
+                out.append(obs)
+        return out
+
+    def put(self, key: str, observations: list["Observation"], *,
+            model: str, prompt_version: str, session_date: str) -> None:
+        payload = json.dumps([obs.to_dict() for obs in observations])
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO extractions
+                   (cache_key, observations_json, n_observations,
+                    model, prompt_version, session_date)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (key, payload, len(observations), model, prompt_version,
+                 session_date or ""),
+            )
+            conn.commit()
+
+    @property
+    def hits(self) -> int:
+        with self._stats_lock:
+            return self._hits
+
+    @property
+    def misses(self) -> int:
+        with self._stats_lock:
+            return self._misses
+
+    def stats_summary(self) -> str:
+        h, m = self.hits, self.misses
+        total = h + m
+        rate = (100 * h / total) if total else 0.0
+        return f"cache: {h} hits / {m} misses ({rate:.1f}% hit rate)"
 
 
 def build_extraction_prompt(session_text: str, session_date: str) -> str:
@@ -215,6 +344,7 @@ def extract_observations(
     session_date: str,
     client: Any = None,
     model: Optional[str] = None,
+    cache: Optional[ExtractionCache] = None,
 ) -> list[Observation]:
     """Extract typed observations from one session via gpt-4o-mini.
 
@@ -223,6 +353,8 @@ def extract_observations(
         session_date: ISO date string for the session (for prompt context).
         client: pre-built OpenAI client. If None, builds one from env.
         model: model id; defaults to gpt-4o-mini. Overridable for tests.
+        cache: optional ExtractionCache. On hit, skips OpenAI entirely.
+               On miss, calls OpenAI and stores the result.
 
     Returns:
         List of Observation records. Empty list on failure (graceful
@@ -232,6 +364,18 @@ def extract_observations(
         return []
 
     model_id = model or os.getenv("JARVIS_LME_EXTRACT_MODEL", _EXTRACTION_MODEL_DEFAULT)
+
+    cache_key: Optional[str] = None
+    if cache is not None:
+        cache_key = ExtractionCache.make_key(
+            session_text=session_text,
+            session_date=session_date,
+            prompt_version=PROMPT_VERSION,
+            model=model_id,
+        )
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
 
     if client is None:
         try:
@@ -260,10 +404,33 @@ def extract_observations(
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception as e:  # noqa: BLE001
-        logger.warning("extraction call failed (graceful skip): %s", e)
+        # API errored — DO NOT cache. A retry on the next run might
+        # produce a different (or non-empty) result, and we want that
+        # path to actually retry rather than serve a stale-error.
+        logger.warning("cache: extraction call failed (graceful skip, not cached): %s", e)
         return []
 
-    return parse_extraction_response(raw)
+    observations = parse_extraction_response(raw)
+
+    # API succeeded — cache the result, including empty lists. Empty is
+    # a deterministic outcome of "the model returned no usable rows for
+    # this prompt"; serving it from cache on re-runs preserves accuracy
+    # parity. NOT caching empty results would let OpenAI's per-call
+    # variance leak into benchmark scores.
+    if cache is not None and cache_key is not None:
+        try:
+            cache.put(
+                cache_key,
+                observations,
+                model=model_id,
+                prompt_version=PROMPT_VERSION,
+                session_date=session_date,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Cache write failures are non-fatal — we still return the obs.
+            logger.warning("cache: write failed (non-fatal): %s", e)
+
+    return observations
 
 
 def extract_observations_batch(
@@ -272,6 +439,7 @@ def extract_observations_batch(
     client: Any = None,
     model: Optional[str] = None,
     max_workers: int = 4,
+    cache: Optional[ExtractionCache] = None,
 ) -> dict[str, list[Observation]]:
     """Extract observations for many sessions in parallel.
 
@@ -321,6 +489,7 @@ def extract_observations_batch(
             session_date=date,
             client=client,
             model=model,
+            cache=cache,
         )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
