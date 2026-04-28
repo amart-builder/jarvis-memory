@@ -205,6 +205,122 @@ def test_render_ms_count_prompt_basic_structure():
     assert "How many bakes?" in out
 
 
+# ── Stages 4E / 4C / 4F / 4G / 4H — surgical prompt patches ──────────
+# Each test pins a specific phrase the patch added — guards against
+# accidental edits and acts as documentation of "this rule is here on
+# purpose, here's the failing-question pattern it targets."
+
+
+def test_ms_count_inclusion_drops_planning_and_wishing():
+    """Stage 4E — pass-2 should drop candidates that are plans/wishes/recollections.
+    Targets 6d550036 (Nigeria project = planning), 88432d0a (ingredients I'm
+    going to use this weekend = future plan)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION_COUNT
+    # The new INCLUSION RULE must enumerate these drop conditions.
+    assert "PLANNED, INTENDED, or WANTED" in RAG_PROMPT_MULTISESSION_COUNT
+    assert "hypothetical / conditional" in RAG_PROMPT_MULTISESSION_COUNT
+    assert "DROP" in RAG_PROMPT_MULTISESSION_COUNT
+
+
+def test_ms_count_keeps_user_did_thing_with_sparse_details():
+    """Stage 4E corollary — the rule must NOT over-prune. Borderline 'I did
+    it' candidates with sparse details should still be kept."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION_COUNT
+    assert "KEEP borderline candidates where the user clearly DID" in RAG_PROMPT_MULTISESSION_COUNT
+
+
+def test_enhanced_has_cumulative_count_rule():
+    """Stage 4C — KU prompt must handle 'earlier explicit count + later
+    implicit increment'. Targets f9e8c073 (3 sessions stated → 5 implied)
+    and 45dc21b6 (Emma's recipes count rises across notes)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_ENHANCED
+    assert "CUMULATIVE" in RAG_PROMPT_ENHANCED
+    assert "INCREMENT" in RAG_PROMPT_ENHANCED
+    # Ordinal language rule for "my Nth time" pattern.
+    assert "ORDINAL LANGUAGE" in RAG_PROMPT_ENHANCED
+    assert '"my Nth time"' in RAG_PROMPT_ENHANCED
+    # Later-evidence-wins disambiguation (explicit vs implicit conflict).
+    assert "LATER one wins" in RAG_PROMPT_ENHANCED
+
+
+def test_enhanced_has_previous_former_rule():
+    """Stage 4F — 'previous/former/old' questions ask for the EARLIER
+    value, NOT the latest. Targets e66b632c (previous PB 5K). Note: 'FIRST'
+    deliberately excluded after reviewer flagged ambiguity (first-note vs
+    first-event-referenced)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_ENHANCED
+    assert "PREVIOUS" in RAG_PROMPT_ENHANCED
+    assert "FORMER" in RAG_PROMPT_ENHANCED
+    assert "use the EARLIER value" in RAG_PROMPT_ENHANCED
+
+
+def test_enhanced_previous_rule_excludes_first():
+    """Reviewer fix — 'FIRST' was removed from the trigger list because it's
+    ambiguous (could mean earliest note OR the first instance referenced)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_ENHANCED
+    # Find the PREVIOUS rule line and check FIRST is not in the trigger list.
+    lines = [l for l in RAG_PROMPT_ENHANCED.split("\n") if "PREVIOUS" in l and "OLD" in l]
+    assert len(lines) == 1, "PREVIOUS rule should appear exactly once"
+    # The trigger list ends after ORIGINAL — FIRST was removed.
+    assert "ORIGINAL QUESTIONS" in lines[0] or "ORIGINAL " in lines[0]
+
+
+def test_enhanced_has_substitution_abstention_rule():
+    """Stage 4G (KU) — don't substitute a similar-but-different item when
+    the question asks for a specific one."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_ENHANCED
+    assert "ABSTENTION ON QUESTION-SUBSTITUTION TRAPS" in RAG_PROMPT_ENHANCED
+
+
+def test_multisession_has_substitution_abstention_rule():
+    """Stage 4G (MS pass-1) — same substitution guard."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION
+    assert "ABSTENTION ON QUESTION-SUBSTITUTION TRAPS" in RAG_PROMPT_MULTISESSION
+
+
+def test_ms_count_has_both_sides_rule():
+    """Stage 4G (MS pass-2) — compare/save/diff questions need BOTH sides
+    quantified. Targets 09ba9854_abs (asks about bus savings; notes only
+    cover train)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION_COUNT
+    assert "BOTH-SIDES RULE" in RAG_PROMPT_MULTISESSION_COUNT
+
+
+def test_temporal_has_before_after_event_rule():
+    """Stage 4H — 'X before/after event Y' counting questions need
+    explicit date filtering. Targets a3838d2b (charity events before
+    Run for the Cure)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_TEMPORAL
+    assert "BEFORE / AFTER A KNOWN EVENT" in RAG_PROMPT_TEMPORAL
+
+
+def test_enhanced_has_cross_attribute_rule():
+    """Stage 4G+ — attribute must match exactly. Targets a96c20ee_abs
+    (undergrad vs thesis substitution)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_ENHANCED
+    assert "CROSS-ATTRIBUTE SUBSTITUTION TRAPS" in RAG_PROMPT_ENHANCED
+    assert "UNDERGRAD" in RAG_PROMPT_ENHANCED
+
+
+def test_multisession_has_cross_attribute_rule():
+    """Stage 4G+ — same in MULTISESSION."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION
+    assert "CROSS-ATTRIBUTE SUBSTITUTION TRAPS" in RAG_PROMPT_MULTISESSION
+
+
+def test_ms_count_has_cross_attribute_rule():
+    """Stage 4G+ — same in MS pass-2."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION_COUNT
+    assert "CROSS-ATTRIBUTE SUBSTITUTION" in RAG_PROMPT_MULTISESSION_COUNT
+
+
+def test_temporal_has_nth_occurrence_rule():
+    """Stage 4H — 'the Nth time I did X' enumeration rule. Targets
+    370a8ff4 (10th jog after recovering from flu)."""
+    from scripts.longmemeval.prompts import RAG_PROMPT_TEMPORAL
+    assert "Nth OCCURRENCE" in RAG_PROMPT_TEMPORAL
+
+
 def test_ms_extract_and_count_prompts_use_same_question_keys():
     """Both passes substitute {sessions}, {question}, {question_date}.
     Pass 2 also substitutes {candidate_list}. Drift between them would

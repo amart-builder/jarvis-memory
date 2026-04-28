@@ -63,8 +63,58 @@ CRITICAL rules:
 have I done Y?"), the answer ALWAYS comes from the LAST note mentioning that topic.
 - If a quantity changes across notes (e.g., worn 4 times → worn 6 times), the \
 LATEST number replaces all earlier ones. Do NOT add or average them.
+- CUMULATIVE / IMPLIED COUNTS: if a later note describes an ADDITIONAL \
+occurrence / instance / event of the same activity beyond what an earlier \
+note stated, INCREMENT the count. Examples:
+  · Note 1 says "I've done yoga 3 times this month"; Note 5 says "just \
+finished another yoga class" → current total is 4.
+  · Note 2 says "I have 5 chickens"; Note 7 says "got two more chickens" → \
+current total is 7.
+  Walk through the notes in order, treat each later mention of an additional \
+event as +1, and report the cumulative total as of the most recent note.
+- ORDINAL LANGUAGE OVERRIDES: phrases like "my Nth time", "my Nth visit", \
+"the Nth one", "for the Nth time" state an exact running total. The most \
+recent ordinal anywhere in the notes IS the answer — even if an earlier note \
+gave a smaller explicit number. ("attended 3 sessions" earlier + "just went \
+to my 5th session" later = 5.)
+- IF AN EARLIER EXPLICIT COUNT AND A LATER IMPLICIT COUNT DISAGREE, the \
+LATER one wins. Trust the most recent evidence, whether explicit ("now I've \
+done it 6 times") or implicit ("did another one today" / "my 6th time").
 - If the question references a role, title, or name that does NOT exactly match \
 what appears in the notes, say the information is not enough to answer.
+- "PREVIOUS" / "OLD" / "FORMER" / "ORIGINAL" QUESTIONS: when the question \
+explicitly uses the words PREVIOUS, OLD, FORMER, or ORIGINAL to refer to a \
+PRIOR value of something that has SINCE BEEN UPDATED, use the EARLIER value, \
+NOT the latest. The "latest note wins" rule applies only when the question \
+asks about CURRENT state. Example: question "what was my previous personal \
+best 5K time?" with Note 2 saying 27:45 and Note 15 saying 25:30 (the new PB) \
+→ answer is 27:45 (the previous PB before it was beaten). Note: this rule \
+does NOT apply to "first" / "earliest" questions about events themselves \
+(e.g., "what was my first job's salary?") — for those, pick the value tied \
+to the FIRST event regardless of note order, using the literal question text.
+- ABSTENTION ON QUESTION-SUBSTITUTION TRAPS: read the question literally. \
+If the question asks about a SPECIFIC item ("the bus", "the red car", \
+"my Tuesday class") and the notes contain a DIFFERENT but similar item \
+("the train", "the blue car", "my Wednesday class"), DO NOT substitute. Say \
+the information is not enough about the specific item asked about. \
+"How much will I save by taking the bus?" — if notes don't quantify a \
+bus-vs-taxi comparison, abstain — do NOT compute a train-vs-taxi answer.
+- CROSS-ATTRIBUTE SUBSTITUTION TRAPS: when the question describes the topic \
+WITH AN ATTRIBUTE (e.g., "my UNDERGRAD course research project poster", \
+"my GRADUATE marathon", "my BLUE car", "my MORNING workout"), the attribute \
+must match SEMANTICALLY in the notes — not just the noun. If the notes only \
+mention the same noun with a SEMANTICALLY DIFFERENT attribute (e.g., notes \
+say "thesis research poster" when question asks about "undergrad course \
+research project poster"; notes say "second marathon" when question asks \
+about "first marathon"; notes say "blue car" when question asks about "red \
+car"), DO NOT substitute. Treat as not-enough-information. Common pitfalls: \
+graduate-vs-undergraduate, first-vs-most-recent, this-year-vs-last-year. \
+EXCEPTION — trivial rephrasings of the SAME attribute DO match: "morning \
+workout" = "workout in the morning"; "Tuesday yoga" = "yoga on Tuesdays"; \
+"my marathon last fall" = "my fall marathon". Plurality, word order, and \
+common synonyms are fine — the rule targets cases where the attribute names \
+a DIFFERENT instance of the noun, not a different way of saying the same \
+instance.
 - If the question asks "how many" or for a count/total, enumerate all relevant \
 items and then state the final number clearly.
 - Give a direct, concise answer. Do not hedge if the evidence is clear.
@@ -118,6 +168,23 @@ the final total as the increase. Example: if followers went from 250 to 350, the
 - NEVER guess, estimate, or calculate values that are not explicitly stated in the notes. \
 If the notes mention a taxi costs $X but never mention the bus/train price (or vice versa), \
 say the information is not enough to answer — do NOT compute a savings amount from missing data.
+- ABSTENTION ON QUESTION-SUBSTITUTION TRAPS: if the question asks about a \
+SPECIFIC named item ("the bus", "Tuesday yoga", "Workshop A") and the notes \
+discuss a DIFFERENT but similar item, do NOT substitute. Answer about the \
+asked-about item or say the information is not enough — never silently swap.
+- CROSS-ATTRIBUTE SUBSTITUTION TRAPS: if the question specifies an attribute \
+("UNDERGRAD project", "FIRST marathon"), the attribute must match \
+SEMANTICALLY (not just by noun). Notes about "thesis research" do NOT \
+answer questions about "undergrad research" (different academic level). \
+Notes about "second marathon" do NOT answer questions about "first \
+marathon". Trivial rephrasings DO match — "Tuesday yoga" = "yoga on \
+Tuesdays" — but a DIFFERENT instance does not. When the attribute genuinely \
+mismatches, abstain rather than substitute.
+- BOTH-SIDES RULE for compare/save/diff questions: questions of the form \
+"how much will I save by X over Y", "what's the difference between X and Y", \
+"how much more/less is X than Y" REQUIRE quantified values for BOTH X AND Y \
+in the notes. If only one side is quantified, the answer is "not enough \
+information." Do NOT pick a half-answer.
 
 ENUMERATION DISCIPLINE (Stage 2 — addresses the multi-session under-counting failure mode):
 - Count by ENUMERATING. List every matching item, then count the list length. Do NOT \
@@ -194,12 +261,32 @@ YOUR JOB: produce the FINAL ANSWER. Decide which candidates truly match the \
 question, merge near-duplicates, count, and answer.
 
 Rules:
-- INCLUSION RULE: for each candidate in the list, ask: "is it plausible \
-that the user's statement is consistent with the question?" KEEP unless it \
-CLEARLY contradicts the question. Borderline candidates COUNT. The user's \
-mention is the count — do NOT drop candidates because the reason/detail/\
-context is not 100% spelled out. If the user mentioned a thing that \
-plausibly satisfies the question, count it.
+- INCLUSION RULE: for each candidate, KEEP it ONLY IF the user actually \
+DID / HAD / IS the thing the question asks about. The user's STATEMENT IS \
+GROUND TRUTH — but the statement must be the user CLAIMING to have done the \
+thing, not merely talking around it. DROP candidates where the user only:
+  (a) mentioned a related topic or domain WITHOUT claiming to have done the \
+specific thing (e.g., question = "how many concerts did I attend"; user said \
+"I love live music" → DROP; user said "I went to a concert last week" → KEEP);
+  (b) PLANNED, INTENDED, or WANTED a future activity that may not have \
+happened (e.g., "I'm thinking of trying X", "I might do X next month", "I \
+should X more often" → DROP; "I tried X last weekend" → KEEP);
+  (c) described someone else doing the thing (friend, family, assistant, \
+hypothetical "people") → DROP. Only the USER themselves doing it counts \
+unless the question explicitly asks about others;
+  (d) used hypothetical / conditional / counterfactual language ("I'd love \
+to", "if I had time", "imagine if I", "in theory I could") → DROP;
+  (e) used PURE RECOLLECTION language with no concrete action AND the \
+question is asking about RECENT or CURRENT activity (e.g., "I was thinking \
+back to my marathon days" → DROP if the question is "how many marathons \
+did I run THIS YEAR?"; KEEP if the question is "how many marathons have \
+I run in my LIFE?" — for lifetime-total questions, recollections of \
+genuinely-completed past events count).
+  KEEP borderline candidates where the user clearly DID the thing but \
+details are sparse. "I baked bread" with no recipe still counts as a bake. \
+"I want to bake" does not. KEEP candidates where the user is recounting a \
+specific, concrete past event (date, place, outcome stated) even if it's \
+described retrospectively — those are real events.
 - DEDUPLICATION: if two candidates describe the same underlying event/item \
 (e.g., "cousin's wedding" and "Rachel's wedding at a vineyard" — likely the \
 same wedding), MERGE into one. Err on the side of merging when borderline.
@@ -215,6 +302,19 @@ deduplication. \
 the total numerically.
 - For "increase/decrease/change" questions: find BOTH starting and ending \
 values, compute the difference. Do NOT report the final value as the change.
+- BOTH-SIDES RULE for compare / save / diff questions ("how much will I \
+save by X over Y", "how much more/less is X than Y"): you need quantified \
+values for BOTH X and Y from the notes. If only one is given, abstain — \
+do NOT silently substitute a similar item (e.g., do NOT use train-vs-taxi \
+to answer a bus-vs-taxi question).
+- ABSTENTION ON SUBSTITUTION: if the question asks about a SPECIFIC named \
+item but the notes/candidates describe a similar-but-different item, do \
+NOT substitute. Answer about the actual item or abstain.
+- CROSS-ATTRIBUTE SUBSTITUTION (count version): if the question asks about \
+items with a specific attribute (e.g., "fitness classes I attend EVERY \
+WEEK", "UNDERGRAD courses I took", "MORNING runs"), only count items \
+where the attribute matches. Drop candidates that mention the same noun \
+with a different attribute or no attribute at all.
 - If the candidate list is empty OR every candidate clearly contradicts \
 the question, say the information is not enough — do NOT guess.
 - NEVER fabricate values that aren't in the notes.
@@ -342,6 +442,16 @@ before comparing to the question date.
 or INDIRECT references. "Investment for a competition" could be "bought tools for \
 a contest." "Kitchen appliance" could be "smoker" or "grill." "Piece of jewelry" \
 could be "ring" or "necklace." Try harder to match before abstaining.
+- "BEFORE / AFTER A KNOWN EVENT" QUESTIONS: when the question asks "how many \
+X did I do BEFORE event Y?" or "AFTER event Y?":
+  1. First find the absolute date of event Y from the notes.
+  2. Then enumerate every X from ALL notes (not just notes near Y).
+  3. Filter to those whose absolute date is BEFORE (or AFTER) Y's date.
+  4. Count the filtered list. State the count.
+- "Nth OCCURRENCE" QUESTIONS: when the question asks about "the Nth time I \
+did X" (e.g., "my 10th jog"), enumerate ALL occurrences of X in chronological \
+order, count to N, and report that occurrence's date. Then use that date for \
+any subsequent calculation in the question.
 
 Notes from past conversations:
 
