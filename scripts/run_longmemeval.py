@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import random
 import re
@@ -39,6 +40,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger("scripts.run_longmemeval")
 
 # Make our scripts package importable.
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -69,9 +72,24 @@ from scripts.longmemeval.prompts import (  # noqa: E402
 # ── Constants ─────────────────────────────────────────────────────────
 
 
-LME_NEO4J_LABEL: str = "LMETestEpisode"
-LME_CHROMA_COLLECTION: str = "jarvis_lme_v1"
+# Worker isolation env vars (Codex's parallel harness sets these per-worker;
+# default to single-tenant values if unset). Each worker thus gets its own
+# Neo4j label, Chroma collection, Chroma path, and group_id prefix — eliminates
+# cross-worker contention on shared HNSW indexes and Cypher writes.
+LME_NEO4J_LABEL: str = os.getenv("JARVIS_LME_NEO4J_LABEL", "LMETestEpisode")
+LME_OBSERVATION_LABEL: str = LME_NEO4J_LABEL.replace("LMETestEpisode", "LMETestObservation", 1)
+LME_CHROMA_COLLECTION: str = os.getenv("JARVIS_LME_CHROMA_COLLECTION", "jarvis_lme_v1")
+LME_GROUP_PREFIX: str = os.getenv("JARVIS_LME_GROUP_PREFIX", "lme_q")
 LME_AGENT_ID: str = "benchmark-longmemeval"
+
+# Stage 5 v2 Phase 8 (2026-04-28): typed observation extraction. When
+# JARVIS_LME_OBSERVATIONS=1, each haystack session also gets a per-session
+# gpt-4o-mini extraction pass that produces typed/concise observations
+# stored as :LMETestObservation_<worker_suffix> nodes. Retrieval surfaces
+# these BEFORE chronological notes in the prompt. Disabled by default —
+# Phase 6 baseline behavior is preserved unless this is explicitly on.
+LME_OBSERVATIONS_ENABLED: bool = os.getenv("JARVIS_LME_OBSERVATIONS", "0") == "1"
+LME_OBSERVATION_TOP_K: int = int(os.getenv("JARVIS_LME_OBSERVATION_TOP_K", "10"))
 
 DEFAULT_DATASET: Path = Path("data/longmemeval/longmemeval_s_cleaned.json")
 DEFAULT_ORACLE: Path = Path("data/longmemeval/longmemeval_oracle.json")
@@ -665,7 +683,146 @@ def ingest_question_haystack(
     if ids_batch:
         chroma_collection.upsert(ids=ids_batch, documents=docs_batch, metadatas=meta_batch)
 
+    # Stage 5 v2 Phase 8 — typed observation extraction.
+    # Adds a small per-session gpt-4o-mini call that produces structured
+    # rows {type, key, value, date, details}. Stored as :LMETestObservation
+    # nodes linked back to their Episode via EVIDENCED_BY. Retrieval will
+    # surface them BEFORE chronological notes in the prompt. Additive only:
+    # if extraction fails, the question still runs from raw sessions.
+    if LME_OBSERVATIONS_ENABLED and ids_batch:
+        try:
+            ingest_observations(
+                driver=driver,
+                chroma_collection=chroma_collection,
+                episode_ids=ids_batch,
+                episode_docs=docs_batch,
+                episode_metas=meta_batch,
+                group_id=group_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Phase 8 must not block the question pipeline. Log and move on.
+            logger.warning("observation ingestion failed (graceful skip): %s", e)
+
     return n_ingested
+
+
+def ingest_observations(
+    *,
+    driver: Any,
+    chroma_collection: Any,
+    episode_ids: list[str],
+    episode_docs: list[str],
+    episode_metas: list[dict[str, Any]],
+    group_id: str,
+) -> int:
+    """Phase 8 — extract and persist typed observations for each session.
+
+    Calls gpt-4o-mini per session (parallel, max 4 concurrent) to produce
+    a small list of typed observations. Each observation becomes one
+    :LMETestObservation node connected to its source :LMETestEpisode via
+    EVIDENCED_BY. Observations also go into the same Chroma collection
+    so the retrieval pipeline can surface them via vector search.
+
+    Returns the count of observation nodes created.
+    """
+    from scripts.longmemeval.extract import extract_observations_batch
+
+    # Wipe any prior observations for this group_id (idempotent re-runs).
+    with driver.session() as db:
+        db.run(
+            f"MATCH (n:{LME_OBSERVATION_LABEL} {{group_id: $gid}}) DETACH DELETE n",
+            gid=group_id,
+        )
+
+    # Build (session_id, text, date) tuples for the batch extractor.
+    # Use the Episode UUID as the session_id so we can map back later.
+    sessions: list[tuple[str, str, str]] = []
+    for uid, doc, meta in zip(episode_ids, episode_docs, episode_metas):
+        sessions.append((uid, doc, meta.get("referenced_date", "")))
+
+    obs_by_episode = extract_observations_batch(sessions=sessions, max_workers=4)
+
+    n_obs = 0
+    obs_ids: list[str] = []
+    obs_docs: list[str] = []
+    obs_metas: list[dict[str, Any]] = []
+
+    for episode_uid, observations in obs_by_episode.items():
+        if not observations:
+            continue
+        episode_meta = next(
+            (m for u, m in zip(episode_ids, episode_metas) if u == episode_uid),
+            None,
+        )
+        if episode_meta is None:
+            continue
+
+        for j, obs in enumerate(observations):
+            obs_uid = f"{episode_uid}__obs_{j:02d}"
+            obs_text = obs.render_line()  # human-readable single line for vector search
+            obs_dict = obs.to_dict()
+
+            # Create the Observation node + EVIDENCED_BY edge to its Episode.
+            with driver.session() as db:
+                db.run(
+                    f"""
+                    MATCH (e:{LME_NEO4J_LABEL} {{uuid: $eid}})
+                    CREATE (o:{LME_OBSERVATION_LABEL} {{
+                        uuid: $oid,
+                        group_id: $gid,
+                        agent_id: $agent_id,
+                        memory_type: 'observation',
+                        episode_type: 'observation',
+                        obs_type: $otype,
+                        obs_key: $okey,
+                        obs_value: $ovalue,
+                        obs_date: $odate,
+                        obs_details: $odetails,
+                        content: $content,
+                        referenced_date: $ref_date,
+                        created_at: datetime($created_at),
+                        t_created: datetime($created_at),
+                        importance: 0.5,
+                        lifecycle_status: 'active',
+                        access_count: 0,
+                        source_episode_uid: $eid
+                    }})
+                    CREATE (o)-[:EVIDENCED_BY]->(e)
+                    """,
+                    eid=episode_uid,
+                    oid=obs_uid,
+                    gid=group_id,
+                    agent_id=LME_AGENT_ID,
+                    otype=obs_dict["type"],
+                    okey=obs_dict["key"],
+                    ovalue=obs_dict["value"],
+                    odate=obs_dict["date"] or "",
+                    odetails=obs_dict["details"],
+                    content=obs_text,
+                    ref_date=episode_meta.get("referenced_date", ""),
+                    created_at=episode_meta.get("created_at", "2024-01-01T00:00:00"),
+                )
+
+            obs_ids.append(obs_uid)
+            obs_docs.append(obs_text)
+            obs_metas.append({
+                "wing": group_id,
+                "group_id": group_id,
+                "memory_type": "observation",
+                "obs_type": obs_dict["type"],
+                "obs_key": obs_dict["key"],
+                "source_episode_uid": episode_uid,
+                "referenced_date": episode_meta.get("referenced_date", ""),
+                "created_at": episode_meta.get("created_at", "2024-01-01T00:00:00"),
+            })
+            n_obs += 1
+
+    if obs_ids:
+        chroma_collection.upsert(ids=obs_ids, documents=obs_docs, metadatas=obs_metas)
+
+    logger.info("Phase 8: ingested %d observations across %d episodes for %s",
+                n_obs, len(episode_ids), group_id)
+    return n_obs
 
 
 # ── Retrieval (OMEGA's triple fan-out + classifier-driven K) ──────────
@@ -805,12 +962,24 @@ def retrieve_with_omega_recipe(
     )
 
     def _vector_search_fn(q: str, n: int) -> list[dict]:
-        """Bind chroma to the per-question collection."""
+        """Bind chroma to the per-question collection.
+
+        Phase 8 note: when `JARVIS_LME_OBSERVATIONS=1`, the same Chroma
+        collection holds both `session_summary` rows AND `observation`
+        rows. The raw-session channel must filter by `memory_type` so
+        observations don't leak into the [Note N] block (they get
+        surfaced separately via `retrieve_observations`).
+        """
         try:
             res = chroma_collection.query(
                 query_texts=[q],
                 n_results=min(n, 100),
-                where={"group_id": group_id},
+                where={
+                    "$and": [
+                        {"group_id": {"$eq": group_id}},
+                        {"memory_type": {"$eq": "session_summary"}},
+                    ]
+                },
             )
         except Exception:
             return []
@@ -1009,7 +1178,19 @@ def call_llm(*, answerer: str, prompt: str, max_tokens: int) -> str:
             from openai import OpenAI
         except ImportError:
             raise RuntimeError("openai SDK not installed; pip install openai")
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        # Postmortem 2026-04-28: explicit per-request timeout. The OpenAI
+        # Python client has NO default request timeout — when OpenAI's edge
+        # closes a TCP connection mid-stream (CLOSE_WAIT half-close), the
+        # client sits in recv() forever. We saw 4 workers wedged for 90+
+        # minutes on a single benchmark run because of this. 120s covers
+        # the 99th percentile of gpt-4.1 long-prompt completions; anything
+        # past that is safer to retry than wait on. max_retries=2 lets the
+        # SDK recycle the connection on transient failures.
+        client = OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            timeout=120.0,
+            max_retries=2,
+        )
         model = _GPT4O_MODEL if answerer == "gpt4o" else _GPT41_MODEL
         # Stage 0: pass ``seed=`` for reproducibility. OpenAI honors this on
         # gpt-4o + gpt-4.1 — combined with temperature=0 it shaves run-to-run
@@ -1024,6 +1205,80 @@ def call_llm(*, answerer: str, prompt: str, max_tokens: int) -> str:
         return (resp.choices[0].message.content or "").strip()
 
     raise ValueError(f"Unknown answerer: {answerer!r} (use opus|gpt4o|gpt41)")
+
+
+# ── Phase 8: observation retrieval ────────────────────────────────────
+
+
+def retrieve_observations(
+    *,
+    chroma_collection: Any,
+    query: str,
+    group_id: str,
+    top_k: int = 10,
+) -> list[dict]:
+    """Vector-search the per-question Chroma collection for observations.
+
+    Phase 8: observations live in the same collection as raw sessions but
+    are tagged ``memory_type="observation"`` in their metadata. We filter
+    by group + type and return up to ``top_k`` ranked by cosine similarity.
+
+    Returns a list of dicts with ``content`` (the rendered observation
+    line, e.g. ``"- fact: user_age = 32"``) and ``similarity``. Empty list
+    on any error — Phase 8 is additive, not load-bearing.
+    """
+    if not query or top_k <= 0:
+        return []
+    try:
+        res = chroma_collection.query(
+            query_texts=[query],
+            n_results=min(top_k, 100),
+            where={
+                "$and": [
+                    {"group_id": {"$eq": group_id}},
+                    {"memory_type": {"$eq": "observation"}},
+                ]
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("observation retrieval failed (graceful skip): %s", e)
+        return []
+    ids = (res.get("ids") or [[]])[0]
+    docs = (res.get("documents") or [[]])[0]
+    dists = (res.get("distances") or [[]])[0]
+    metas = (res.get("metadatas") or [[]])[0]
+    out: list[dict] = []
+    for uid, doc, dist, meta in zip(ids, docs, dists, metas):
+        similarity = max(0.0, 1.0 - float(dist))
+        out.append({
+            "uuid": uid,
+            "content": doc,
+            "similarity": similarity,
+            "obs_type": (meta or {}).get("obs_type", ""),
+            "obs_key": (meta or {}).get("obs_key", ""),
+            "referenced_date": (meta or {}).get("referenced_date", ""),
+            "source_episode_uid": (meta or {}).get("source_episode_uid", ""),
+        })
+    return out
+
+
+def format_observations_block(observations: list[dict]) -> str:
+    """Render a compact "Structured evidence" block to prepend to the prompt.
+
+    The lines are already in render_line() format (e.g.
+    ``- event: yoga_class = 5th class [2023-06-12] — vinyasa style``).
+    """
+    if not observations:
+        return ""
+    lines = [obs.get("content", "").strip() for obs in observations if obs.get("content")]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return ""
+    return (
+        "[Structured evidence (extracted observations from prior sessions)]\n"
+        + "\n".join(lines)
+        + "\n[End structured evidence]"
+    )
 
 
 # ── Per-question pipeline ─────────────────────────────────────────────
@@ -1083,6 +1338,8 @@ def run_one_question(
     # Stage 4D defaults — populated when question has a date anchor.
     lme_temporal_window: Optional[tuple[str, str]] = None
     lme_query_expanded = False
+    # Stage 5 v2 Phase 8 default — populated when JARVIS_LME_OBSERVATIONS=1.
+    n_observations = 0
 
     t0 = time.time()
     try:
@@ -1090,7 +1347,7 @@ def run_one_question(
         raw_qdate = q.get("question_date", "")
         qdate = parse_longmemeval_date(raw_qdate) if raw_qdate else ""
 
-        group_id = f"lme_q_{qid}"
+        group_id = f"{LME_GROUP_PREFIX}_{qid}"
         classification = classify(question)
         shadow_classifier_label = classification.label
         classifier_rule = classification.rule
@@ -1205,6 +1462,26 @@ def run_one_question(
             for i, h in enumerate(hits)
         )
 
+        # 4.1. Stage 5 v2 Phase 8 — prepend a structured-evidence block of
+        # extracted observations BEFORE the chronological notes. The model
+        # gets both: a compact list of typed facts ("- fact: user_age = 32
+        # [2023-04-11]") at the top, then the full session transcripts
+        # below. This is the move AgentMemory uses to beat OMEGA on
+        # multi-session: the LLM sees ENUMERATED facts plus their evidence,
+        # instead of having to derive them from paragraph-long quotes.
+        # Additive: failures fall through silently to the original block.
+        if LME_OBSERVATIONS_ENABLED:
+            obs_hits = retrieve_observations(
+                chroma_collection=chroma_collection,
+                query=question,
+                group_id=group_id,
+                top_k=LME_OBSERVATION_TOP_K,
+            )
+            n_observations = len(obs_hits)
+            obs_block = format_observations_block(obs_hits)
+            if obs_block:
+                sessions_text = obs_block + "\n\n" + sessions_text
+
         # 4.5. Stage 1: confidence-based abstention guard. When retrieval
         # is weak AND the question names an entity nobody mentions, prepend
         # an explicit abstention rule. Targets 4 _abs questions in the
@@ -1311,6 +1588,7 @@ def run_one_question(
                 list(lme_temporal_window) if lme_temporal_window else None
             ),
             "lme_query_expanded": lme_query_expanded,
+            "n_observations": n_observations,
             "max_tokens": max_tokens,
             "answerer": answerer,
             # Stage 0: ``seed`` arg is honored only for OpenAI answerers
@@ -1352,6 +1630,7 @@ def run_one_question(
                 list(lme_temporal_window) if lme_temporal_window else None
             ),
             "lme_query_expanded": lme_query_expanded,
+            "n_observations": n_observations,
             "max_tokens": max_tokens,
             "answerer": answerer,
             "seed_honored": answerer in ("gpt4o", "gpt41"),
@@ -1384,7 +1663,12 @@ def setup_resources():
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
     # Isolated Chroma collection — separate from prod jarvis_memories.
-    chroma_client = chromadb.PersistentClient(path=CHROMADB_PATH)
+    # Per-worker Chroma path via JARVIS_LME_CHROMA_PATH env var (set by the
+    # parallel harness) eliminates HNSW write contention when multiple workers
+    # run the adapter concurrently. Falls back to the shared path for solo runs.
+    chroma_path = os.getenv("JARVIS_LME_CHROMA_PATH", CHROMADB_PATH)
+    os.makedirs(chroma_path, exist_ok=True)
+    chroma_client = chromadb.PersistentClient(path=chroma_path)
     ef = SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL)
     try:
         collection = chroma_client.get_collection(LME_CHROMA_COLLECTION, embedding_function=ef)

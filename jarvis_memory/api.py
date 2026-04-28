@@ -1006,7 +1006,20 @@ def main():
     import uvicorn
 
     logger.info(f"Starting jarvis-memory API on {API_HOST}:{API_PORT}")
-    uvicorn.run(app, host=API_HOST, port=API_PORT)
+    # Postmortem 2026-04-28: add concurrency + keepalive caps so a single
+    # blocked request handler can't wedge the whole server. limit_concurrency
+    # bounds the request queue (returns 503 past the cap rather than queueing
+    # forever); timeout_keep_alive caps how long a connection sits idle.
+    # Combined with the CPU watchdog, this turns a runaway from "burns CPU
+    # for days unnoticed" into "rejects new requests fast and gets restarted
+    # within 5 minutes."
+    uvicorn.run(
+        app,
+        host=API_HOST,
+        port=API_PORT,
+        timeout_keep_alive=5,
+        limit_concurrency=32,
+    )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ Upgraded for shared brain architecture. When a session ends:
 2. Generates a session snapshot from the conversation summary
 3. Saves the snapshot to Neo4j with HAS_SNAPSHOT edge
 4. Marks the session as completed
-5. Updates STATUS.md as a file-level fallback
+5. Optionally writes a file-level fallback when explicitly configured
 6. Triggers session compaction
 """
 import json
@@ -100,7 +100,23 @@ def save_session_state(session_info: dict, summary: str):
 
 
 def update_status_md(session_info: dict, summary: str):
-    """Write STATUS.md as a file-level fallback."""
+    """Write an explicitly configured file-level fallback.
+
+    Canonical project STATUS.md files are shared coordination state. A stop hook
+    must not overwrite them just because Claude was launched from a project cwd.
+    """
+    fallback_path = os.getenv("JARVIS_STOP_STATUS_FALLBACK_PATH", "").strip()
+    if not fallback_path:
+        logger.info("No JARVIS_STOP_STATUS_FALLBACK_PATH configured; skipping file fallback")
+        return
+
+    status_path = Path(fallback_path).expanduser()
+    if not status_path.is_absolute():
+        status_path = Path.cwd() / status_path
+    if status_path.name == "STATUS.md":
+        logger.warning("Refusing to write stop-hook fallback to STATUS.md")
+        return
+
     group_id = session_info.get("group_id", "unknown")
     device = session_info.get("device", "unknown")
     session_id = session_info.get("session_id", "unknown")
@@ -121,11 +137,11 @@ This file is a fallback. The primary session state is in Neo4j.
 Use `continue_session` MCP tool or check Jarvis Memory for full context.
 """
     try:
-        status_path = Path.cwd() / "STATUS.md"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
         status_path.write_text(status_content)
-        logger.info(f"STATUS.md updated at {status_path}")
+        logger.info(f"Stop-hook fallback written at {status_path}")
     except Exception as e:
-        logger.warning(f"Failed to update STATUS.md: {e}")
+        logger.warning(f"Failed to write stop-hook fallback: {e}")
 
 
 def trigger_compaction(session_info: dict):

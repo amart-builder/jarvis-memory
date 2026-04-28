@@ -208,3 +208,107 @@ class TestRunDreamCycle:
         ])
         out = engine.run_dream_cycle()
         assert set(out.keys()) >= {"fix_citations", "orphans", "stale_edges"}
+
+
+# ── Postmortem 2026-04-28: daily_digest semantic-dedup safeguards ───────
+
+
+class _FakeEmbedStore:
+    """Test double for EmbeddingStore. Tracks search() invocation count."""
+
+    def __init__(self, returns: list[dict] | None = None, sleep_per_call: float = 0.0):
+        self.calls = 0
+        self._returns = returns or []
+        self._sleep = sleep_per_call
+
+    def health_check(self) -> bool:
+        return True
+
+    def search(self, query: str, limit: int = 5):
+        self.calls += 1
+        if self._sleep:
+            time.sleep(self._sleep)
+        return list(self._returns)
+
+
+def _engine_with_embed(embed_store, scripts):
+    e = CompactionEngine.__new__(CompactionEngine)
+    e._driver = _FakeDriver(scripts)
+    e._owns_driver = False
+    e._graphiti = None
+    e._embed_store = embed_store
+    return e
+
+
+class TestDailyDigestSafeguards:
+    """Guards introduced after the 2026-04-28 API runaway postmortem.
+
+    The daily_digest Pass-2 loop calls embed_store.search() once per
+    remaining memory, which encodes the query through MiniLM each call.
+    These tests pin the safety net: the feature flag actually skips the
+    loop, and the wall-clock timeout aborts before going forever.
+    """
+
+    @staticmethod
+    def _mems(n: int) -> list[dict]:
+        return [
+            {
+                "uuid": f"m-{i}",
+                "content": f"unique content number {i}",
+                "name": "",
+                "memory_type": "fact",
+            }
+            for i in range(n)
+        ]
+
+    def test_flag_disabled_skips_pass_2_entirely(self, monkeypatch):
+        """JARVIS_SEMANTIC_DEDUP=0 must NOT call embed_store.search()."""
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_ENABLED", False)
+
+        embed = _FakeEmbedStore()
+        rows = self._mems(50)
+        engine = _engine_with_embed(embed, [
+            (lambda c: "MATCH (n)" in c and "compaction_daily_run IS NULL" in c, rows),
+        ])
+
+        report = engine.daily_digest()
+        assert embed.calls == 0, f"semantic dedup must be skipped; saw {embed.calls} embed calls"
+        # Pass 1 (exact hash dedup) should still run normally
+        assert "merged_count" in report
+
+    def test_timeout_aborts_long_loop(self, monkeypatch):
+        """Wall-clock cap aborts Pass 2 mid-loop instead of running forever."""
+        # Make sure flag is on so we exercise Pass 2
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_ENABLED", True)
+        # 1-second cap, 0.4s per search → cap trips after ~3 calls
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_TIMEOUT_SEC", 1)
+
+        embed = _FakeEmbedStore(sleep_per_call=0.4)
+        rows = self._mems(20)
+        engine = _engine_with_embed(embed, [
+            (lambda c: "MATCH (n)" in c and "compaction_daily_run IS NULL" in c, rows),
+        ])
+
+        start = time.monotonic()
+        report = engine.daily_digest()
+        elapsed = time.monotonic() - start
+
+        # Should bail well under the 20-call worst case (20*0.4 = 8s)
+        assert elapsed < 4.0, f"timeout did not fire; loop ran {elapsed:.1f}s"
+        # Some calls happen before the cap trips, but not all 20
+        assert 1 <= embed.calls < 20, f"unexpected call count: {embed.calls}"
+        assert "merged_count" in report
+
+    def test_default_flag_runs_pass_2(self, monkeypatch):
+        """Sanity: with the flag on (default) and a reasonable timeout, Pass 2
+        actually invokes embed_store.search()."""
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_ENABLED", True)
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_TIMEOUT_SEC", 60)
+
+        embed = _FakeEmbedStore(returns=[])
+        rows = self._mems(3)
+        engine = _engine_with_embed(embed, [
+            (lambda c: "MATCH (n)" in c and "compaction_daily_run IS NULL" in c, rows),
+        ])
+        engine.daily_digest()
+        assert embed.calls == 3, f"expected one search per remaining memory; saw {embed.calls}"

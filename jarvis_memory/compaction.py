@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -33,6 +35,20 @@ from .config import (
 from .classifier import classify_memory
 
 logger = logging.getLogger(__name__)
+
+
+# Postmortem 2026-04-28 (docs/eng/api-runaway-postmortem.md):
+# the daily_digest semantic dedup loop calls EmbeddingStore.search() per
+# memory, which encodes the query through MiniLM-L6-v2 each time. With
+# ChromaDB at 0 embeddings the loop still runs hundreds of forward passes
+# and burned 75 CPU-hours in the live incident. These two guardrails are
+# safety nets while a proper batched-encode rewrite is reviewed:
+#
+#   JARVIS_SEMANTIC_DEDUP=0          → skip Pass 2 entirely
+#   JARVIS_SEMANTIC_DEDUP_TIMEOUT=60 → hard wall-clock cap (seconds) per
+#                                      compaction phase
+SEMANTIC_DEDUP_ENABLED: bool = os.getenv("JARVIS_SEMANTIC_DEDUP", "1") == "1"
+SEMANTIC_DEDUP_TIMEOUT_SEC: int = int(os.getenv("JARVIS_SEMANTIC_DEDUP_TIMEOUT", "60"))
 
 
 def _content_hash(text: str) -> str:
@@ -226,11 +242,33 @@ class CompactionEngine:
                     merged_uuids.add(dup["uuid"])
                     merged_count += 1
 
-            # Pass 2: Semantic dedup via ChromaDB (if available)
+            # Pass 2: Semantic dedup via ChromaDB (if available).
+            # Postmortem 2026-04-28: guarded by feature flag + wall-clock
+            # timeout. The per-memory embed_store.search() runs a MiniLM
+            # forward pass each call, so a 500-memory loop is hundreds of
+            # encodes. Aborts on timeout rather than hanging the worker.
             semantic_merged = 0
-            if self._embed_store and self._embed_store.health_check():
+            phase_start = time.monotonic()
+            phase_aborted = False
+            iterations = 0
+
+            if not SEMANTIC_DEDUP_ENABLED:
+                logger.info("Daily digest: semantic dedup skipped (JARVIS_SEMANTIC_DEDUP=0)")
+            elif self._embed_store and self._embed_store.health_check():
                 remaining = [m for m in memories if m["uuid"] not in merged_uuids]
                 for i, mem in enumerate(remaining):
+                    iterations += 1
+                    elapsed = time.monotonic() - phase_start
+                    if elapsed > SEMANTIC_DEDUP_TIMEOUT_SEC:
+                        logger.warning(
+                            "Daily digest: semantic dedup hit %ds wall-clock cap "
+                            "after %d iterations (of %d remaining); aborting Pass 2 "
+                            "to protect the worker. Increase JARVIS_SEMANTIC_DEDUP_TIMEOUT "
+                            "if this is expected.",
+                            SEMANTIC_DEDUP_TIMEOUT_SEC, iterations, len(remaining),
+                        )
+                        phase_aborted = True
+                        break
                     if mem["uuid"] in merged_uuids:
                         continue
                     content = mem.get("content", "") or mem.get("name", "")
@@ -249,8 +287,13 @@ class CompactionEngine:
                                 merged_count += 1
                                 semantic_merged += 1
 
-            if semantic_merged > 0:
-                logger.info(f"Daily digest: {semantic_merged} semantic merges (threshold {similarity_threshold})")
+            if semantic_merged > 0 or phase_aborted:
+                logger.info(
+                    "Daily digest: %d semantic merges (threshold %.2f, %d iters, %.1fs%s)",
+                    semantic_merged, similarity_threshold, iterations,
+                    time.monotonic() - phase_start,
+                    ", ABORTED" if phase_aborted else "",
+                )
 
             # Tag daily run
             with self._driver.session() as db:

@@ -243,6 +243,44 @@ skip Phase 6, go to Phase 8.
 
 **Expected lift:** +1 to +4 if applicable, 0 otherwise.
 
+#### Phase 6 execution (2026-04-28, isolated experiment per Atlas/Codex amendment)
+
+After Phase 3 reverted (net −6 in validation) and Phase 4 reverted (fired 0/104),
+Atlas insisted Phase 6 run as an **isolated** experiment — not bundled with
+Phase 8 — to keep causality clean. Diagnostic-driven scope only.
+
+**Phase 5 baseline (Phase 2 instrumentation, no Phase 3/4 patches):** 70/104 correct (67.31%).
+- 42 baseline-wrongs fixed
+- 32 baseline-wrongs still wrong
+- 28 baseline-rights still right
+- 2 baseline-rights regressed (`d905b33f`, `gpt4_2c50253f`)
+
+**Filter-drop analysis** on the 32 still-wrongs (gold present in pre-filter
+stages but missing from `final_chrono`):
+
+| qid | category | best pre-rank | post-temporal_boost | filtered cap | widening fix |
+|---|---|---|---|---|---|
+| 58bf7951 | SS-user | pure_vec=6 | 17 | 12 → DROP | max_res 12→20 ✓ |
+| 8550ddae | SS-user | weighted_rerank=2 | 17 | 12 → DROP | max_res 12→20 ✓ |
+| 726462e0 | SS-user | pure_vec=36 only | n/a (out of merge) | 12 → DROP | merge issue, not max_res |
+| d6233ab6 | SS-pref | pure_vec=35 only | n/a (out of merge) | 10 → DROP | merge issue, not max_res |
+| gpt4_468eb063 | TR | raw_secondary=1 | 35 | 20 → DROP | TR widen 20→40 too risky for 1 outlier |
+
+**MS not widened:** All 18 MS still-wrongs have gold IN `final_chrono`
+(generation-side enumeration failures, not retrieval). Widening MS would only
+add noise to prompts where the issue is the LLM, not the retrieval.
+
+**Surgical change:** `FILTER_CONFIG["single-session-user"]["max_res"]: 12 → 20`
+in `scripts/longmemeval/classifier.py`. One number. No prompt changes, no
+retrieval-pipeline changes.
+
+**Smoke (5 questions: 2 targets + 3 SS-user sentinels):** 5/5 correct.
+- 58bf7951 → fixed (gold rank 13 in chrono, was -1)
+- 8550ddae → fixed (gold rank 2 in chrono, was -1)
+- e47becba, 118b2229, 51a45a95 → still correct (sentinels preserved)
+
+**104q validation (in progress):** gate ≥95.4% with 0 NEW regressions.
+
 ### Phase 7 — Skip / demote 5B
 
 Adapter already does dual fan-out (precedence merge of expanded + raw).

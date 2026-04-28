@@ -281,8 +281,19 @@ def is_counting_question(question: str) -> bool:
 
 
 # Adaptive filter thresholds per category (OMEGA lines 354-364).
+# Stage 5 v2 Phase 6 (2026-04-28, surgical 5G widen, isolated experiment):
+#   SS-user max_res 12 → 20. Phase 2 diagnostics on the 32 still-wrongs after
+#   Stages 0-4 showed two SS-user cases where gold sat at post-rerank ranks
+#   17-17 but got cut by max_res=12: 58bf7951 (gold rank 17) and 8550ddae
+#   (gold rank 17). Both are clear filter-drops where every pre-filter stage
+#   has the gold present and only the per-category cap is removing it.
+#   Widening to 20 catches both without changing merge/rerank logic. Other
+#   filter-drop candidates (726462e0 SS-user merge-fall-out, d6233ab6 SS-pref
+#   merge-fall-out, gpt4_468eb063 TR rank-35 outlier) need different fixes
+#   and are out of Phase 6 scope. MS not widened — all 18 MS still-wrongs
+#   already have gold in final_chrono (generation-side failures, not retrieval).
 FILTER_CONFIG: dict[str, dict[str, float | int]] = {
-    "single-session-user":       {"min_rel": 0.12, "min_res": 3, "max_res": 12, "max_tokens": 512},
+    "single-session-user":       {"min_rel": 0.12, "min_res": 3, "max_res": 20, "max_tokens": 512},
     "single-session-assistant":  {"min_rel": 0.15, "min_res": 2, "max_res": 10, "max_tokens": 512},
     "single-session-preference": {"min_rel": 0.12, "min_res": 3, "max_res": 10, "max_tokens": 2048},
     "knowledge-update":          {"min_rel": 0.15, "min_res": 3, "max_res": 15, "max_tokens": 2048},
