@@ -33,6 +33,36 @@ import logging
 import os
 import random
 import re
+import resource
+
+
+def _bump_fd_limit_if_low(target: int = 8192) -> None:
+    """Raise the open-file ulimit to ``target`` if it's lower.
+
+    macOS defaults to 256 file descriptors per process. The adapter
+    holds simultaneous handles on Chroma's HNSW segments, Neo4j's bolt
+    pool, sentence-transformer model files, the cross-encoder, plus
+    transient TLS sockets for OpenAI's batched extraction calls. 256
+    blows up mid-run with "Too many open files" — observed on Mini at
+    ingest_observations time on 2026-04-28. Bumping to 8192 has no
+    runtime cost (it's just a kernel-side cap) and self-heals any host
+    that didn't pre-set it via shell ulimit or launchd.
+    """
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft >= target:
+            return
+        new_soft = min(target, hard) if hard != resource.RLIM_INFINITY else target
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+    except (ValueError, OSError):
+        # If the kernel refuses (e.g., target > hard cap on a locked-down
+        # box), don't crash — the run might still succeed; if it doesn't,
+        # the operator gets the same OSError as before.
+        pass
+
+
+_bump_fd_limit_if_low()
+
 import sys
 import time
 import traceback
