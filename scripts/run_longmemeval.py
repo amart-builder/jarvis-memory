@@ -672,20 +672,41 @@ def retrieve_with_omega_recipe(
     driver: Any,
     embedding_store: Any,
     chroma_collection: Any,
+    question_date: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """OMEGA-style retrieval: triple fan-out + per-category K floor.
 
     Returns enriched-hit dicts sorted CHRONOLOGICALLY by referenced_date
     (oldest first), as required by the prompt rules ("higher note
     numbers are more recent").
+
+    Stage 4D: when ``question_date`` is provided, applies OMEGA's
+    query expansion (counting cues + resolved relative dates + entity
+    extraction) to the primary retrieval call, and boosts hits whose
+    ``referenced_date`` falls inside the inferred temporal window.
+    Targets the dominant Stage 1.5 failure mode where gold sessions
+    were retrieved but ranked too low for date-anchored questions.
     """
     from jarvis_memory.scoring import scored_search
+    from scripts.longmemeval.temporal_anchor import (
+        expand_query, infer_temporal_range_anchored, hit_in_temporal_window,
+    )
 
     # K floor per OMEGA recipe: counting=45, multi/temporal=25, default=20.
     if counting:
         k = COUNTING_K_FLOOR
     else:
         k = K_FLOORS.get(category, 20)
+
+    # Stage 4D: OMEGA-style query expansion + anchored temporal range.
+    # Expansion is purely additive (original query stays in the string),
+    # so RRF fusion still benefits from the user's exact phrasing on
+    # any keyword/lexical channel.
+    expanded_query = expand_query(query, question_date) if question_date else query
+    temporal_range: Optional[tuple[str, str]] = (
+        infer_temporal_range_anchored(query, question_date)
+        if question_date else None
+    )
 
     def _vector_search_fn(q: str, n: int) -> list[dict]:
         """Bind chroma to the per-question collection."""
@@ -719,13 +740,12 @@ def retrieve_with_omega_recipe(
         return out
 
     # OMEGA does triple fan-out — primary + secondary unfiltered + tertiary
-    # with raw query. We approximate with TWO calls: scored_search already
-    # does query expansion + RRF over vector + keyword + (PPR if intent
-    # multi_hop), so the "primary" is a strong fused ranking. We add a
-    # second "raw, no expansion" pass to widen recall on edge cases where
-    # expansion misses.
+    # with raw query. We approximate with TWO calls. Stage 4D: pass the
+    # OMEGA-EXPANDED query (counting cues + dates + entities) to the
+    # primary call, and the RAW query to the secondary call. This mirrors
+    # OMEGA's secondary+tertiary pattern (line 982-1011 of their script).
     primary = scored_search(
-        query=query,
+        query=expanded_query,
         group_id=group_id,
         namespace=LME_NEO4J_LABEL,
         limit=k,
@@ -791,6 +811,25 @@ def retrieve_with_omega_recipe(
         vec_weight=vec_w,
         kw_weight=kw_w,
     )
+
+    # Stage 4D: temporal-window boost. Hits whose ``referenced_date``
+    # falls inside the inferred window get a 1.5× multiplier on their
+    # weighted score — pushes date-relevant sessions toward the top
+    # without dropping anything (which would destroy recall on edge
+    # cases). Failure analysis on Stage 1.5 still-wrongs showed gold
+    # sessions for date-anchored questions are RETRIEVED but ranked
+    # 11-20, where the LLM ignores them. This boost lifts them.
+    if temporal_range is not None:
+        for h in primary:
+            ref_date = str(h.get("referenced_date") or h.get("created_at") or "")
+            if ref_date and hit_in_temporal_window(ref_date, temporal_range):
+                h["_lme_weighted_score"] = (
+                    float(h.get("_lme_weighted_score", 0.0)) * 1.5
+                )
+        primary.sort(
+            key=lambda h: h.get("_lme_weighted_score", 0.0),
+            reverse=True,
+        )
 
     # Apply OMEGA's adaptive filter (per-category min_rel / min_res / max_res).
     cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
@@ -936,6 +975,9 @@ def run_one_question(
     # Stage 4A defaults — populated only on multi-session counting questions.
     ms_two_pass_used = False
     ms_pass1_chars = 0
+    # Stage 4D defaults — populated when question has a date anchor.
+    lme_temporal_window: Optional[tuple[str, str]] = None
+    lme_query_expanded = False
 
     t0 = time.time()
     try:
@@ -965,6 +1007,16 @@ def run_one_question(
         lme_intent = classify_lme_intent(question)
         lme_channel_weights = channel_weights(category, lme_intent)
 
+        # Stage 4D: capture temporal-anchor diagnostics. Same dup-pattern
+        # as Stage 1.5 — both are pure-regex helpers, microsecond cost,
+        # cleaner than threading return values.
+        from scripts.longmemeval.temporal_anchor import (
+            expand_query, infer_temporal_range_anchored,
+        )
+        if qdate:
+            lme_temporal_window = infer_temporal_range_anchored(question, qdate)
+            lme_query_expanded = expand_query(question, qdate) != question
+
         # 1. Ingest haystack into isolated namespace.
         n_sessions = ingest_question_haystack(
             driver=driver,
@@ -973,7 +1025,7 @@ def run_one_question(
             group_id=group_id,
         )
 
-        # 2. Retrieve via OMEGA recipe.
+        # 2. Retrieve via OMEGA recipe (with Stage 4D temporal anchor).
         hits = retrieve_with_omega_recipe(
             query=question,
             group_id=group_id,
@@ -982,6 +1034,7 @@ def run_one_question(
             driver=driver,
             embedding_store=embedding_store,
             chroma_collection=chroma_collection,
+            question_date=qdate,
         )
 
         # 3. Confidence diagnostics ONLY — do not suppress max_tokens
@@ -1117,6 +1170,10 @@ def run_one_question(
             "total_line_appended": total_line_appended,
             "ms_two_pass_used": ms_two_pass_used,
             "ms_pass1_chars": ms_pass1_chars,
+            "lme_temporal_window": (
+                list(lme_temporal_window) if lme_temporal_window else None
+            ),
+            "lme_query_expanded": lme_query_expanded,
             "max_tokens": max_tokens,
             "answerer": answerer,
             # Stage 0: ``seed`` arg is honored only for OpenAI answerers
@@ -1154,6 +1211,10 @@ def run_one_question(
             "total_line_appended": total_line_appended,
             "ms_two_pass_used": ms_two_pass_used,
             "ms_pass1_chars": ms_pass1_chars,
+            "lme_temporal_window": (
+                list(lme_temporal_window) if lme_temporal_window else None
+            ),
+            "lme_query_expanded": lme_query_expanded,
             "max_tokens": max_tokens,
             "answerer": answerer,
             "seed_honored": answerer in ("gpt4o", "gpt41"),

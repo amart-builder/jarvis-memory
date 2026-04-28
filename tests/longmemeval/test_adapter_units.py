@@ -1498,3 +1498,123 @@ def test_run_one_question_ms_counting_pass1_crash_propagates_to_error_row(monkey
     # error row. ms_pass1_chars stays 0 because pass 1 never returned.
     assert row["ms_two_pass_used"] is True
     assert row["ms_pass1_chars"] == 0
+
+
+# ── Stage 4D — temporal anchor wired into adapter ────────────────────
+
+
+def test_run_one_question_logs_temporal_window_when_question_has_date_anchor(monkeypatch):
+    """For a question with "in March", the JSONL row carries a non-None
+    lme_temporal_window field. Anchor must come from question_date."""
+    from scripts import run_longmemeval as adapter
+
+    fake_hits = [
+        {"uuid": "lme_q_qX__001_x", "content": "x",
+         "score": 0.5, "similarity": 0.5,
+         "referenced_date": "2024-03-15T10:00:00"},
+    ]
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe",
+                        lambda **kw: list(fake_hits))
+    monkeypatch.setattr(adapter, "call_llm", lambda **kw: "answer")
+
+    q = {
+        "question_id": "qX",
+        "question": "how many fun runs in January 2024",
+        "question_date": "2024/05/15 (Wed) 12:00",
+        "haystack_sessions": [], "haystack_session_ids": [], "haystack_dates": [],
+    }
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="multi-session",
+    )
+    # "in January 2024" → range filter fires (Pattern 5 of infer_anchor).
+    assert row["lme_temporal_window"] is not None
+    assert isinstance(row["lme_temporal_window"], list)
+    assert len(row["lme_temporal_window"]) == 2
+
+
+def test_run_one_question_temporal_window_none_when_no_date_signal(monkeypatch):
+    """A non-temporal question should NOT trigger a temporal window."""
+    from scripts import run_longmemeval as adapter
+
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe", lambda **kw: [])
+    monkeypatch.setattr(adapter, "call_llm", lambda **kw: "answer")
+
+    q = {
+        "question_id": "qY",
+        "question": "what is my favorite color",
+        "question_date": "2024/03/15 (Fri) 12:00",
+        "haystack_sessions": [], "haystack_session_ids": [], "haystack_dates": [],
+    }
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="single-session-user",
+    )
+    assert row["lme_temporal_window"] is None
+    assert row["lme_query_expanded"] is False  # no signals fired
+
+
+def test_run_one_question_query_expanded_flag_fires_for_counting(monkeypatch):
+    """Counting questions trigger the expand_query counting cue, even
+    without a temporal anchor in the question text."""
+    from scripts import run_longmemeval as adapter
+
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe", lambda **kw: [])
+    monkeypatch.setattr(adapter, "call_llm", lambda **kw: "answer")
+
+    q = {
+        "question_id": "qZ",
+        "question": "how many books did I read",
+        "question_date": "2024/03/15 (Fri) 12:00",
+        "haystack_sessions": [], "haystack_session_ids": [], "haystack_dates": [],
+    }
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="multi-session",
+    )
+    # Expand fires (counting cue), even though range filter doesn't.
+    assert row["lme_query_expanded"] is True
+    assert row["lme_temporal_window"] is None
+
+
+def test_run_one_question_error_row_carries_stage4d_fields(monkeypatch):
+    """Defensive: ms_two_pass_used was added in Stage 4A test; this
+    extends to lme_temporal_window + lme_query_expanded for Stage 4D."""
+    from scripts import run_longmemeval as adapter
+
+    monkeypatch.setattr(adapter, "ingest_question_haystack", lambda **kw: 1)
+    monkeypatch.setattr(adapter, "retrieve_with_omega_recipe", lambda **kw: [])
+
+    def boom(**kw):
+        raise RuntimeError("simulated outage")
+
+    monkeypatch.setattr(adapter, "call_llm", boom)
+
+    q = {
+        "question_id": "qErr",
+        "question": "how many bakes in March",
+        "question_date": "2024/05/15 (Wed) 12:00",
+        "haystack_sessions": [], "haystack_session_ids": [], "haystack_dates": [],
+    }
+    row = adapter.run_one_question(
+        q=q, answerer="gpt41", driver=None, embedding_store=None,
+        chroma_collection=None, oracle_category="multi-session",
+    )
+    assert row["error"]
+    # Defensive defaults must be present in error row.
+    assert "lme_temporal_window" in row
+    assert "lme_query_expanded" in row
+
+
+def test_retrieve_with_omega_recipe_accepts_question_date_param():
+    """Smoke: retrieve_with_omega_recipe's signature accepts question_date
+    as a keyword arg. Absence here would mean the wire-in regressed."""
+    import inspect
+    from scripts.run_longmemeval import retrieve_with_omega_recipe
+    sig = inspect.signature(retrieve_with_omega_recipe)
+    assert "question_date" in sig.parameters
+    # And it's optional (kwarg with default) — legacy callers don't break.
+    assert sig.parameters["question_date"].default is None
