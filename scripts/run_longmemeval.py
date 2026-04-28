@@ -36,6 +36,7 @@ import sys
 import time
 import traceback
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -43,6 +44,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.longmemeval.classifier import (  # noqa: E402
+    ABSTENTION_FILTER,
     CONTEXT_BUDGET_CHARS,
     CONTEXT_BUDGET_MIN_HITS,
     COUNTING_K_FLOOR,
@@ -54,6 +56,7 @@ from scripts.longmemeval.classifier import (  # noqa: E402
     is_counting_question,
 )
 from scripts.longmemeval.prompts import (  # noqa: E402
+    answer_to_str,
     format_session_for_prompt,
     format_session_text,
     parse_longmemeval_date,
@@ -62,25 +65,12 @@ from scripts.longmemeval.prompts import (  # noqa: E402
     render_prompt,
 )
 
+
 # ── Constants ─────────────────────────────────────────────────────────
 
 
-def _safe_identifier_env(name: str, default: str) -> str:
-    """Read an env var that will be interpolated as a Neo4j label.
-
-    The LongMemEval parallel harness uses this to give every worker an
-    isolated label. Keep the validation here because labels cannot be query
-    parameters in Cypher.
-    """
-    value = os.environ.get(name, default).strip() or default
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value):
-        raise ValueError(f"{name} must be a safe identifier, got {value!r}")
-    return value
-
-
-LME_NEO4J_LABEL: str = _safe_identifier_env("JARVIS_LME_NEO4J_LABEL", "LMETestEpisode")
-LME_CHROMA_COLLECTION: str = os.environ.get("JARVIS_LME_CHROMA_COLLECTION", "jarvis_lme_v1")
-LME_GROUP_PREFIX: str = os.environ.get("JARVIS_LME_GROUP_PREFIX", "lme_q")
+LME_NEO4J_LABEL: str = "LMETestEpisode"
+LME_CHROMA_COLLECTION: str = "jarvis_lme_v1"
 LME_AGENT_ID: str = "benchmark-longmemeval"
 
 DEFAULT_DATASET: Path = Path("data/longmemeval/longmemeval_s_cleaned.json")
@@ -770,9 +760,7 @@ def retrieve_with_omega_recipe(
     """
     from jarvis_memory.scoring import scored_search
     from scripts.longmemeval.temporal_anchor import (
-        expand_query,
-        hit_in_temporal_window,
-        infer_temporal_range_anchored,
+        expand_query, infer_temporal_range_anchored, hit_in_temporal_window,
     )
 
     # Stage 5 Phase 2: optional per-stage UUID snapshots for pipeline
@@ -1092,8 +1080,6 @@ def run_one_question(
     # Stage 4A defaults — populated only on multi-session counting questions.
     ms_two_pass_used = False
     ms_pass1_chars = 0
-    evidence_packet_used = False
-    evidence_packet_chars = 0
     # Stage 4D defaults — populated when question has a date anchor.
     lme_temporal_window: Optional[tuple[str, str]] = None
     lme_query_expanded = False
@@ -1104,7 +1090,7 @@ def run_one_question(
         raw_qdate = q.get("question_date", "")
         qdate = parse_longmemeval_date(raw_qdate) if raw_qdate else ""
 
-        group_id = f"{LME_GROUP_PREFIX}_{qid}"
+        group_id = f"lme_q_{qid}"
         classification = classify(question)
         shadow_classifier_label = classification.label
         classifier_rule = classification.rule
@@ -1130,8 +1116,7 @@ def run_one_question(
         # as Stage 1.5 — both are pure-regex helpers, microsecond cost,
         # cleaner than threading return values.
         from scripts.longmemeval.temporal_anchor import (
-            expand_query,
-            infer_temporal_range_anchored,
+            expand_query, infer_temporal_range_anchored,
         )
         if qdate:
             lme_temporal_window = infer_temporal_range_anchored(question, qdate)
@@ -1219,23 +1204,6 @@ def run_one_question(
             )
             for i, h in enumerate(hits)
         )
-
-        # 4.1. Stage 5 Phase 3: evidence packet for MS/TR/KU. Targets the
-        # dominant Stage 4D failure mode (per Codex's diagnostic re-read):
-        # 21 of 32 still-wrong have all gold sessions visible in the
-        # prompt; the model just doesn't enumerate scattered evidence.
-        # The packet pre-extracts user-turn snippets with high signal
-        # density (dates / quantities / entities / ordinals) into a dense
-        # block at the top of context. Heuristic-only — no LLM call.
-        evidence_packet_used = False
-        evidence_packet_chars = 0
-        if category in ("multi-session", "temporal-reasoning", "knowledge-update"):
-            from scripts.longmemeval.evidence_packet import build_evidence_packet
-            packet = build_evidence_packet(hits, question)
-            if packet:
-                sessions_text = packet + "\n\n" + sessions_text
-                evidence_packet_used = True
-                evidence_packet_chars = len(packet)
 
         # 4.5. Stage 1: confidence-based abstention guard. When retrieval
         # is weak AND the question names an entity nobody mentions, prepend
@@ -1339,8 +1307,6 @@ def run_one_question(
             "total_line_appended": total_line_appended,
             "ms_two_pass_used": ms_two_pass_used,
             "ms_pass1_chars": ms_pass1_chars,
-            "evidence_packet_used": evidence_packet_used,
-            "evidence_packet_chars": evidence_packet_chars,
             "lme_temporal_window": (
                 list(lme_temporal_window) if lme_temporal_window else None
             ),
@@ -1382,8 +1348,6 @@ def run_one_question(
             "total_line_appended": total_line_appended,
             "ms_two_pass_used": ms_two_pass_used,
             "ms_pass1_chars": ms_pass1_chars,
-            "evidence_packet_used": evidence_packet_used,
-            "evidence_packet_chars": evidence_packet_chars,
             "lme_temporal_window": (
                 list(lme_temporal_window) if lme_temporal_window else None
             ),
@@ -1404,10 +1368,10 @@ def run_one_question(
 
 def setup_resources():
     """Connect to Neo4j + ChromaDB + EmbeddingStore. Returns the trio."""
-    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
     from neo4j import GraphDatabase
-
     import chromadb
+    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
     from jarvis_memory.config import (
         CHROMADB_PATH,
         EMBEDDING_MODEL,
@@ -1419,11 +1383,8 @@ def setup_resources():
 
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
-    # Isolated Chroma collection — separate from prod jarvis_memories. The
-    # parallel targeted runner can override the path per worker so Chroma never
-    # has concurrent writers on the same persistent store.
-    chroma_path = os.environ.get("JARVIS_LME_CHROMA_PATH", CHROMADB_PATH)
-    chroma_client = chromadb.PersistentClient(path=chroma_path)
+    # Isolated Chroma collection — separate from prod jarvis_memories.
+    chroma_client = chromadb.PersistentClient(path=CHROMADB_PATH)
     ef = SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL)
     try:
         collection = chroma_client.get_collection(LME_CHROMA_COLLECTION, embedding_function=ef)
@@ -1434,10 +1395,7 @@ def setup_resources():
             metadata={"hnsw:space": "cosine"},
         )
 
-    embedding_store = EmbeddingStore(
-        path=chroma_path,
-        collection_name=LME_CHROMA_COLLECTION,
-    )
+    embedding_store = EmbeddingStore()  # uses prod Chroma — required for scoring helpers
     return driver, embedding_store, collection
 
 
