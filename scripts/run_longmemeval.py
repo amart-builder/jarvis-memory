@@ -1094,7 +1094,6 @@ def run_one_question(
     ms_pass1_chars = 0
     evidence_packet_used = False
     evidence_packet_chars = 0
-    temporal_two_lane_used = False
     # Stage 4D defaults — populated when question has a date anchor.
     lme_temporal_window: Optional[tuple[str, str]] = None
     lme_query_expanded = False
@@ -1212,57 +1211,14 @@ def run_one_question(
                 )
 
         # 4. Format sessions block (shared across single-pass + two-pass).
-        # Stage 5 v2 Phase 4: temporal two-lane context. When the query
-        # has an inferred temporal window (e.g., "past two weeks", "in
-        # December", "between X and Y"), partition retrieved notes into
-        # in-window and out-of-window lanes and render in-window first.
-        # Doesn't drop anything — Codex flagged that a hard temporal
-        # filter would lose notes that mention an in-window event but
-        # are dated outside the window. Two-lane keeps recall, just
-        # surfaces the date-relevant context first so the model is more
-        # likely to enumerate from the top.
-        from scripts.longmemeval.temporal_anchor import hit_in_temporal_window
-
-        def _fmt(idx: int, h: dict) -> str:
-            return format_session_for_prompt(
+        sessions_text = "\n\n".join(
+            format_session_for_prompt(
                 content=h.get("content", ""),
                 date_str=str(h.get("referenced_date") or h.get("created_at") or ""),
-                index=idx,  # 1-indexed for [Note N] readability
+                index=i + 1,  # 1-indexed for [Note N] readability
             )
-
-        temporal_two_lane_used = False
-        if lme_temporal_window is not None and hits:
-            in_window: list[tuple[int, dict]] = []
-            out_window: list[tuple[int, dict]] = []
-            for i, h in enumerate(hits):
-                ref_date = str(h.get("referenced_date") or h.get("created_at") or "")
-                if ref_date and hit_in_temporal_window(ref_date, lme_temporal_window):
-                    in_window.append((i + 1, h))
-                else:
-                    out_window.append((i + 1, h))
-            # Only fire two-lane render when BOTH lanes are non-empty.
-            # If everything is in-window or everything is out, the
-            # partition adds noise without a salience benefit.
-            if in_window and out_window:
-                sessions_text = (
-                    "[In-window notes — dates fall inside the temporal "
-                    "range implied by the question]\n\n"
-                    + "\n\n".join(_fmt(idx, h) for idx, h in in_window)
-                    + "\n\n[Other retrieved notes — outside the inferred "
-                    "window but kept for context. A note dated outside "
-                    "the window may still describe an in-window event.]"
-                    "\n\n"
-                    + "\n\n".join(_fmt(idx, h) for idx, h in out_window)
-                )
-                temporal_two_lane_used = True
-            else:
-                sessions_text = "\n\n".join(
-                    _fmt(i + 1, h) for i, h in enumerate(hits)
-                )
-        else:
-            sessions_text = "\n\n".join(
-                _fmt(i + 1, h) for i, h in enumerate(hits)
-            )
+            for i, h in enumerate(hits)
+        )
 
         # 4.1. Stage 5 Phase 3: evidence packet for MS/TR/KU. Targets the
         # dominant Stage 4D failure mode (per Codex's diagnostic re-read):
@@ -1385,7 +1341,6 @@ def run_one_question(
             "ms_pass1_chars": ms_pass1_chars,
             "evidence_packet_used": evidence_packet_used,
             "evidence_packet_chars": evidence_packet_chars,
-            "temporal_two_lane_used": temporal_two_lane_used,
             "lme_temporal_window": (
                 list(lme_temporal_window) if lme_temporal_window else None
             ),
@@ -1429,7 +1384,6 @@ def run_one_question(
             "ms_pass1_chars": ms_pass1_chars,
             "evidence_packet_used": evidence_packet_used,
             "evidence_packet_chars": evidence_packet_chars,
-            "temporal_two_lane_used": temporal_two_lane_used,
             "lme_temporal_window": (
                 list(lme_temporal_window) if lme_temporal_window else None
             ),
