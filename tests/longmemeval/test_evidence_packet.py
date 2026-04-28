@@ -268,3 +268,90 @@ def test_build_evidence_packet_handles_missing_date_field():
     # Should still produce a packet, just without the date prefix.
     assert "[Note 1]" in out
     assert "I baked on May 21" in out
+
+
+# ── Stage 5 v2 Phase 4 — temporal two-lane partitioning ──────────────
+# These pin the partition logic separately from the adapter wiring, so
+# we can test it without spinning up Neo4j/Chroma.
+
+
+def _two_lane_partition(hits, window):
+    """Mirror the partition logic in run_longmemeval.run_one_question
+    section 4. Pulled out as a helper so the test can pin behavior
+    without instantiating the full adapter."""
+    from scripts.longmemeval.temporal_anchor import hit_in_temporal_window
+    in_window = []
+    out_window = []
+    for i, h in enumerate(hits):
+        ref = str(h.get("referenced_date") or h.get("created_at") or "")
+        if ref and hit_in_temporal_window(ref, window):
+            in_window.append((i + 1, h))
+        else:
+            out_window.append((i + 1, h))
+    return in_window, out_window
+
+
+def test_temporal_two_lane_partitions_by_window():
+    window = ("2023-05-15T00:00:00", "2023-05-30T00:00:00")
+    hits = [
+        {"referenced_date": "2023-05-10T00:00:00", "content": "x"},  # before
+        {"referenced_date": "2023-05-20T00:00:00", "content": "y"},  # in
+        {"referenced_date": "2023-06-01T00:00:00", "content": "z"},  # after
+    ]
+    in_w, out_w = _two_lane_partition(hits, window)
+    assert len(in_w) == 1
+    assert in_w[0][0] == 2  # original [Note 2] preserved
+    assert len(out_w) == 2
+    assert {idx for idx, _ in out_w} == {1, 3}
+
+
+def test_temporal_two_lane_preserves_chronological_indices():
+    """Each hit keeps its original (i+1) index so [Note N] references
+    stay consistent with the evidence packet that runs above us."""
+    window = ("2023-05-01T00:00:00", "2023-05-31T00:00:00")
+    hits = [
+        {"referenced_date": "2023-04-15T00:00:00", "content": "a"},
+        {"referenced_date": "2023-05-15T00:00:00", "content": "b"},
+        {"referenced_date": "2023-04-20T00:00:00", "content": "c"},
+        {"referenced_date": "2023-05-20T00:00:00", "content": "d"},
+    ]
+    in_w, out_w = _two_lane_partition(hits, window)
+    in_indices = [idx for idx, _ in in_w]
+    out_indices = [idx for idx, _ in out_w]
+    assert in_indices == [2, 4]
+    assert out_indices == [1, 3]
+
+
+def test_temporal_two_lane_handles_missing_dates_as_out_of_window():
+    """A note with no date can't be classified as in-window; treat as
+    out. Means it stays in context but doesn't get the salience boost."""
+    window = ("2023-05-01T00:00:00", "2023-05-31T00:00:00")
+    hits = [
+        {"referenced_date": "", "content": "no date"},
+        {"referenced_date": "2023-05-15T00:00:00", "content": "in"},
+    ]
+    in_w, out_w = _two_lane_partition(hits, window)
+    assert [idx for idx, _ in in_w] == [2]
+    assert [idx for idx, _ in out_w] == [1]
+
+
+def test_temporal_two_lane_all_in_window_returns_empty_out():
+    window = ("2023-05-01T00:00:00", "2023-05-31T00:00:00")
+    hits = [
+        {"referenced_date": "2023-05-10T00:00:00", "content": "a"},
+        {"referenced_date": "2023-05-20T00:00:00", "content": "b"},
+    ]
+    in_w, out_w = _two_lane_partition(hits, window)
+    assert len(in_w) == 2
+    assert out_w == []
+
+
+def test_temporal_two_lane_all_out_of_window_returns_empty_in():
+    window = ("2023-05-01T00:00:00", "2023-05-31T00:00:00")
+    hits = [
+        {"referenced_date": "2023-04-10T00:00:00", "content": "a"},
+        {"referenced_date": "2023-06-01T00:00:00", "content": "b"},
+    ]
+    in_w, out_w = _two_lane_partition(hits, window)
+    assert in_w == []
+    assert len(out_w) == 2
