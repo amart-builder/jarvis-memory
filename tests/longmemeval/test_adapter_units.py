@@ -300,6 +300,128 @@ def test_compute_diagnostics_handles_id_field_fallback():
     assert d["gold_ranks"]["g1"] == 1
 
 
+def test_compute_diagnostics_includes_final_hit_uuids():
+    """Stage 5 Phase 2: ``final_hit_uuids`` records the ordered prompt
+    UUIDs so we can diff retrieval order between runs (parity check)."""
+    from scripts.run_longmemeval import compute_retrieval_diagnostics
+    group_id = "lme_q_q6"
+    hits = [
+        {"uuid": f"{group_id}__001_a"},
+        {"uuid": f"{group_id}__002_b"},
+        {"uuid": f"{group_id}__003_c"},
+    ]
+    d = compute_retrieval_diagnostics(hits, [], group_id)
+    assert d["final_hit_uuids"] == [
+        f"{group_id}__001_a",
+        f"{group_id}__002_b",
+        f"{group_id}__003_c",
+    ]
+
+
+# ── Stage 5 Phase 2: pipeline-stage diagnostics ────────────────────────
+
+
+def test_compute_pipeline_diagnostics_basic_per_stage_ranks():
+    """Each stage's snapshot should produce a per-gold-session rank dict."""
+    from scripts.run_longmemeval import compute_pipeline_diagnostics
+    group_id = "lme_q_pq1"
+    snapshots = {
+        # Expanded stage: gold "g1" at rank 3, "g2" missing.
+        "expanded_primary": [
+            f"{group_id}__001_x",
+            f"{group_id}__002_y",
+            f"{group_id}__003_g1",
+        ],
+        # Raw stage: gold "g2" at rank 1, "g1" missing.
+        "raw_secondary": [
+            f"{group_id}__010_g2",
+            f"{group_id}__011_z",
+        ],
+        # Merged: both present.
+        "merged_pre_rerank": [
+            f"{group_id}__010_g2",
+            f"{group_id}__001_x",
+            f"{group_id}__003_g1",
+        ],
+    }
+    d = compute_pipeline_diagnostics(snapshots, ["g1", "g2"], group_id)
+    assert d["pipeline_stage_ranks"]["expanded_primary"] == {"g1": 3, "g2": -1}
+    assert d["pipeline_stage_ranks"]["raw_secondary"] == {"g1": -1, "g2": 1}
+    assert d["pipeline_stage_ranks"]["merged_pre_rerank"] == {"g1": 3, "g2": 1}
+
+
+def test_compute_pipeline_diagnostics_pool_sizes():
+    """``pipeline_stage_sizes`` records ``len()`` per stage so analysis
+    scripts can show 'Stage X dropped from N to M' at a glance."""
+    from scripts.run_longmemeval import compute_pipeline_diagnostics
+    group_id = "lme_q_pq2"
+    snapshots = {
+        "expanded_primary": [f"{group_id}__001_a", f"{group_id}__002_b"],
+        "filtered": [f"{group_id}__001_a"],
+    }
+    d = compute_pipeline_diagnostics(snapshots, ["a"], group_id)
+    assert d["pipeline_stage_sizes"]["expanded_primary"] == 2
+    assert d["pipeline_stage_sizes"]["filtered"] == 1
+
+
+def test_compute_pipeline_diagnostics_handles_empty_stage():
+    """A stage with zero candidates (e.g. keyword channel down) records
+    -1 ranks for every gold and size 0."""
+    from scripts.run_longmemeval import compute_pipeline_diagnostics
+    group_id = "lme_q_pq3"
+    snapshots = {"pure_kw": []}
+    d = compute_pipeline_diagnostics(snapshots, ["g1", "g2"], group_id)
+    assert d["pipeline_stage_ranks"]["pure_kw"] == {"g1": -1, "g2": -1}
+    assert d["pipeline_stage_sizes"]["pure_kw"] == 0
+
+
+def test_compute_pipeline_diagnostics_handles_no_gold():
+    """If no oracle gold IDs, every stage gets an empty rank dict — and
+    we don't crash."""
+    from scripts.run_longmemeval import compute_pipeline_diagnostics
+    snapshots = {"expanded_primary": ["lme_q_pq4__001_x"]}
+    d = compute_pipeline_diagnostics(snapshots, [], "lme_q_pq4")
+    assert d["pipeline_stage_ranks"]["expanded_primary"] == {}
+    assert d["pipeline_stage_sizes"]["expanded_primary"] == 1
+
+
+def test_compute_pipeline_diagnostics_handles_dataclass_hits():
+    """``pure_kw`` channel returns ``Hit`` dataclass instances (not dicts).
+    The pipeline diagnostic must extract UUIDs via attribute access too.
+    Regression test for the smoke crash on first Phase 2 run."""
+    from scripts.run_longmemeval import compute_pipeline_diagnostics
+    # Simulate the snapshot writer's output: it stringifies UUIDs already,
+    # so by the time compute_pipeline_diagnostics runs, snapshots is just
+    # list[str]. Polymorphism is in `_snap` (in retrieve_with_omega_recipe).
+    # This test pins the post-snapshot contract: a list of UUID strings.
+    group_id = "lme_q_pq6"
+    snapshots = {
+        "pure_kw": [f"{group_id}__001_g1", f"{group_id}__002_g2"],
+        "pure_vec": [f"{group_id}__005_g1"],  # dict-channel still works
+    }
+    d = compute_pipeline_diagnostics(snapshots, ["g1", "g2"], group_id)
+    assert d["pipeline_stage_ranks"]["pure_kw"]["g1"] == 1
+    assert d["pipeline_stage_ranks"]["pure_kw"]["g2"] == 2
+    assert d["pipeline_stage_ranks"]["pure_vec"]["g1"] == 1
+    assert d["pipeline_stage_ranks"]["pure_vec"]["g2"] == -1
+
+
+def test_compute_pipeline_diagnostics_first_rank_wins_within_stage():
+    """If a gold session appears twice in one stage's list (ingestion
+    duplicate), keep the better (lower) rank."""
+    from scripts.run_longmemeval import compute_pipeline_diagnostics
+    group_id = "lme_q_pq5"
+    snapshots = {
+        "merged_pre_rerank": [
+            f"{group_id}__001_other",
+            f"{group_id}__005_g1",   # rank 2
+            f"{group_id}__010_g1",   # rank 3 — duplicate, must NOT overwrite rank 2
+        ],
+    }
+    d = compute_pipeline_diagnostics(snapshots, ["g1"], group_id)
+    assert d["pipeline_stage_ranks"]["merged_pre_rerank"]["g1"] == 2
+
+
 # ── Stage 0: write_run_summary ────────────────────────────────────────
 
 

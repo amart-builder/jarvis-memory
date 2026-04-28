@@ -451,6 +451,11 @@ def compute_retrieval_diagnostics(
     def _at_or_below(k: int) -> int:
         return sum(1 for r in found_ranks if r <= k)
 
+    # Stage 5 Phase 2: capture the ordered list of final UUIDs that
+    # entered the prompt. Lets us diff retrieval order between runs (e.g.
+    # for parallelism parity check) and label each hit by gold-or-not.
+    final_uuids = [str(h.get("uuid") or h.get("id") or "") for h in hits]
+
     return {
         "gold_session_ids": sorted(gold_set),
         "gold_count": gold_count,
@@ -463,6 +468,71 @@ def compute_retrieval_diagnostics(
         "all_gold_in_top5": gold_count > 0 and all(0 < r <= 5 for r in ranks.values()),
         "any_gold_in_top5": any(0 < r <= 5 for r in ranks.values()),
         "candidate_pool_size": len(hits),
+        "final_hit_uuids": final_uuids,
+    }
+
+
+# ── Stage 5 Phase 2: per-stage retrieval pipeline diagnostics ────────
+
+
+def compute_pipeline_diagnostics(
+    stage_snapshots: dict[str, list[str]],
+    answer_session_ids: list[str],
+    group_id: str,
+) -> dict[str, Any]:
+    """Compute per-stage gold-session ranks across the retrieval pipeline.
+
+    Stage 5 Phase 2 (Atlas/Codex amendment to old Stage 5 plan): the
+    existing ``compute_retrieval_diagnostics`` only records the FINAL
+    post-everything rank, which led to a dangerous misread (Codex caught:
+    ``docs/eval/codex-stage5-review.md``). We thought Bucket C gold sessions
+    were below the prompt cap; they were already in the prompt, the model
+    just wasn't using them.
+
+    This function records ranks at EVERY pipeline stage so we can label
+    each still-wrong question by failure mode:
+
+      - Not retrieved anywhere: gold ranks all -1 across every stage.
+        Fix: improve channels (BM25 boost, query rewrite).
+
+      - Retrieved then dropped: gold has a positive rank in early stages
+        but -1 later. Tells us exactly which cap dropped it.
+        Fix: widen that cap surgically, or adjust filter.
+
+      - Visible but ignored: gold present in final_chrono but model still
+        wrong. Fix: salience (evidence packet, two-lane temporal).
+
+    Args:
+        stage_snapshots: dict {stage_name: [uuid, uuid, ...]} populated by
+            ``retrieve_with_omega_recipe`` at each stage. Stage names:
+            ``expanded_primary``, ``raw_secondary``, ``merged_pre_rerank``,
+            ``pure_vec``, ``pure_kw``, ``weighted_rerank``, ``temporal_boost``,
+            ``filtered``, ``final_chrono``.
+        answer_session_ids: oracle gold sessions for this question.
+        group_id: per-question UUID prefix.
+
+    Returns:
+        Dict ``{"pipeline_stage_ranks": {stage_name: {sid: rank, ...}}}``
+        — ranks are 1-based, -1 if missing at that stage. ``stage_pool_sizes``
+        is included so we can see at a glance "Stage X had N candidates."
+    """
+    gold_set = set(answer_session_ids)
+
+    per_stage_ranks: dict[str, dict[str, int]] = {}
+    per_stage_sizes: dict[str, int] = {}
+
+    for stage_name, uuids in stage_snapshots.items():
+        ranks_at_stage: dict[str, int] = {sid: -1 for sid in gold_set}
+        for rank, uid in enumerate(uuids, start=1):
+            sid = _extract_session_id(str(uid), group_id)
+            if sid in gold_set and ranks_at_stage[sid] == -1:
+                ranks_at_stage[sid] = rank
+        per_stage_ranks[stage_name] = ranks_at_stage
+        per_stage_sizes[stage_name] = len(uuids)
+
+    return {
+        "pipeline_stage_ranks": per_stage_ranks,
+        "pipeline_stage_sizes": per_stage_sizes,
     }
 
 
@@ -673,6 +743,7 @@ def retrieve_with_omega_recipe(
     embedding_store: Any,
     chroma_collection: Any,
     question_date: Optional[str] = None,
+    stage_snapshots: Optional[dict[str, list[str]]] = None,
 ) -> list[dict[str, Any]]:
     """OMEGA-style retrieval: triple fan-out + per-category K floor.
 
@@ -691,6 +762,31 @@ def retrieve_with_omega_recipe(
     from scripts.longmemeval.temporal_anchor import (
         expand_query, infer_temporal_range_anchored, hit_in_temporal_window,
     )
+
+    # Stage 5 Phase 2: optional per-stage UUID snapshots for pipeline
+    # diagnostics. ``_snap(stage, hits)`` is a no-op when the caller
+    # didn't pass ``stage_snapshots``. Pure side-effect — never alters
+    # retrieval logic.
+    #
+    # Note: ``pure_kw`` from ``jarvis_memory.search.keyword`` returns
+    # ``Hit`` dataclass instances, while every other stage returns plain
+    # dicts. We extract UUID via attribute-or-key pattern so both work.
+    def _snap(stage_name: str, hits_list: list) -> None:
+        if stage_snapshots is None:
+            return
+
+        def _uuid_of(h: Any) -> str:
+            # dict-style hit
+            if isinstance(h, dict):
+                return str(h.get("uuid") or h.get("id") or "")
+            # dataclass / object-style hit (e.g. Hit from search.keyword)
+            return str(
+                getattr(h, "uuid", None)
+                or getattr(h, "id", None)
+                or ""
+            )
+
+        stage_snapshots[stage_name] = [_uuid_of(h) for h in hits_list]
 
     # K floor per OMEGA recipe: counting=45, multi/temporal=25, default=20.
     if counting:
@@ -754,6 +850,7 @@ def retrieve_with_omega_recipe(
         vector_search_fn=_vector_search_fn,
         include_expansion=True,
     )
+    _snap("expanded_primary", primary)
     seen_ids = {h.get("uuid") or h.get("id") for h in primary}
 
     secondary = scored_search(
@@ -766,11 +863,13 @@ def retrieve_with_omega_recipe(
         vector_search_fn=_vector_search_fn,
         include_expansion=False,  # raw query
     )
+    _snap("raw_secondary", secondary)
     for h in secondary:
         hid = h.get("uuid") or h.get("id")
         if hid and hid not in seen_ids:
             primary.append(h)
             seen_ids.add(hid)
+    _snap("merged_pre_rerank", primary)
 
     # Stage 1.5: OMEGA-style channel re-weighting. ``scored_search`` fuses
     # vec/keyword with EQUAL weights via RRF; OMEGA's recipe applies
@@ -790,6 +889,7 @@ def retrieve_with_omega_recipe(
     # signal beyond the cutoff.
     pool_n = max(k * 2, 60)
     pure_vec = _vector_search_fn(query, pool_n)
+    _snap("pure_vec", pure_vec)
     try:
         from jarvis_memory.search.keyword import keyword_search
         pure_kw = keyword_search(
@@ -803,6 +903,7 @@ def retrieve_with_omega_recipe(
         # Keyword channel unreachable (Neo4j hiccup, fulltext-index miss,
         # whatever) → fall back to weighted vector only. Better than crashing.
         pure_kw = []
+    _snap("pure_kw", pure_kw)
 
     primary = lme_weighted_rerank(
         primary,
@@ -811,6 +912,7 @@ def retrieve_with_omega_recipe(
         vec_weight=vec_w,
         kw_weight=kw_w,
     )
+    _snap("weighted_rerank", primary)
 
     # Stage 4D: temporal-window boost. Hits whose ``referenced_date``
     # falls inside the inferred window get a 1.5× multiplier on their
@@ -830,6 +932,7 @@ def retrieve_with_omega_recipe(
             key=lambda h: h.get("_lme_weighted_score", 0.0),
             reverse=True,
         )
+    _snap("temporal_boost", primary)
 
     # Apply OMEGA's adaptive filter (per-category min_rel / min_res / max_res).
     cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
@@ -844,6 +947,7 @@ def retrieve_with_omega_recipe(
         kept = above[:max_res]
     else:
         kept = primary[:max(min_res, len(primary))][:max_res]
+    _snap("filtered", kept)
 
     # Recency boost for knowledge-update — OMEGA recipe (line 945).
     if category == "knowledge-update" and kept:
@@ -863,6 +967,7 @@ def retrieve_with_omega_recipe(
 
     # Sort by referenced_date ascending (oldest → newest) for the prompt.
     kept.sort(key=_hit_date_key)
+    _snap("final_chrono", kept)
     return kept
 
 
@@ -1026,6 +1131,12 @@ def run_one_question(
         )
 
         # 2. Retrieve via OMEGA recipe (with Stage 4D temporal anchor).
+        # Stage 5 Phase 2: collect per-stage UUID snapshots for pipeline
+        # diagnostics when oracle is available. ``stage_snapshots`` stays
+        # None for non-diagnostic runs so the snapshot is a true no-op.
+        stage_snapshots: Optional[dict[str, list[str]]] = (
+            {} if oracle_answer_session_ids is not None else None
+        )
         hits = retrieve_with_omega_recipe(
             query=question,
             group_id=group_id,
@@ -1035,6 +1146,7 @@ def run_one_question(
             embedding_store=embedding_store,
             chroma_collection=chroma_collection,
             question_date=qdate,
+            stage_snapshots=stage_snapshots,
         )
 
         # 3. Confidence diagnostics ONLY — do not suppress max_tokens
@@ -1071,6 +1183,17 @@ def run_one_question(
                 answer_session_ids=oracle_answer_session_ids,
                 group_id=group_id,
             )
+            # Stage 5 Phase 2: pipeline-stage rank diagnostics. Tells us
+            # WHERE in the pipeline gold drops, not just whether it
+            # entered the prompt. Critical for designing surgical fixes.
+            if stage_snapshots is not None:
+                diagnostics.update(
+                    compute_pipeline_diagnostics(
+                        stage_snapshots=stage_snapshots,
+                        answer_session_ids=oracle_answer_session_ids,
+                        group_id=group_id,
+                    )
+                )
 
         # 4. Format sessions block (shared across single-pass + two-pass).
         sessions_text = "\n\n".join(
@@ -1126,6 +1249,9 @@ def run_one_question(
                 prompt=pass2_prompt,
                 max_tokens=max_tokens,
             )
+            # Stage 5 Phase 2: prompt hash on the FINAL prompt that
+            # produced the hypothesis (pass-2 for MS two-pass).
+            final_prompt_for_hash = pass2_prompt
         else:
             prompt = render_prompt(
                 category=category,
@@ -1140,6 +1266,17 @@ def run_one_question(
                 prompt=prompt,
                 max_tokens=max_tokens,
             )
+            final_prompt_for_hash = prompt
+
+        # Stage 5 Phase 2: hash the final prompt + record it on
+        # diagnostics. Lets us diff prompt content between runs (parity
+        # check, regression bisect) without storing the full prompt.
+        if oracle_answer_session_ids is not None:
+            import hashlib
+            diagnostics["prompt_hash"] = hashlib.sha256(
+                final_prompt_for_hash.encode("utf-8")
+            ).hexdigest()[:16]
+            diagnostics["prompt_chars"] = len(final_prompt_for_hash)
 
         # 5.5. Stage 2: defensive total-line post-process for MS counting
         # questions when the LLM forgot the "Total: N" final line. No-op
