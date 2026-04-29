@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 import jarvis_memory.search.rerank as rerank_mod
-from jarvis_memory.search.rerank import rerank, reset_model_cache, _extract_text
+from jarvis_memory.search.rerank import rerank, reset_model_cache, _extract_text, _model_kwargs_from_env
 
 
 # ── Fake reranker model ─────────────────────────────────────────────────
@@ -149,6 +149,20 @@ def test_rerank_respects_disable_env_flag(monkeypatch, fake_model):
 
     assert out is candidates
     assert fake_model.calls == [], "model.rank() called even though JARVIS_RERANK=0"
+
+
+def test_model_kwargs_from_env_can_force_device(monkeypatch):
+    """Benchmark runs can force CPU when the default MPS path is unhealthy."""
+    monkeypatch.setenv("JARVIS_RERANK_DEVICE", "cpu")
+
+    assert _model_kwargs_from_env() == {"device": "cpu"}
+
+
+def test_model_kwargs_from_env_ignores_blank_device(monkeypatch):
+    """Blank env values should preserve the rerankers package default."""
+    monkeypatch.setenv("JARVIS_RERANK_DEVICE", "  ")
+
+    assert _model_kwargs_from_env() == {}
 
 
 def test_rerank_handles_empty_inputs(fake_model):

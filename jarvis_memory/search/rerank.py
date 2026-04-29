@@ -28,6 +28,7 @@ problems. Cases:
 **Env flags.**
   * ``JARVIS_RERANK=0`` — disable reranking, return RRF order. Default ``1``.
   * ``JARVIS_RERANK_MODEL`` — override the model identifier.
+  * ``JARVIS_RERANK_DEVICE`` — force a torch device, e.g. ``cpu`` when MPS hangs.
 """
 from __future__ import annotations
 
@@ -58,6 +59,20 @@ def _resolve_model_name(override: Optional[str] = None) -> str:
     if override:
         return override
     return os.environ.get("JARVIS_RERANK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+
+
+def _model_kwargs_from_env() -> dict[str, Any]:
+    """Return optional model-loader kwargs from env.
+
+    ``rerankers`` auto-selects MPS on Apple Silicon. For long benchmark
+    runs MPS can enter an uninterruptible wait, so callers need a runtime
+    way to force CPU without changing retrieval logic.
+    """
+    kwargs: dict[str, Any] = {}
+    device = os.environ.get("JARVIS_RERANK_DEVICE", "").strip()
+    if device:
+        kwargs["device"] = device
+    return kwargs
 
 
 def _get_model(model_name: Optional[str] = None) -> Any:
@@ -92,7 +107,7 @@ def _get_model(model_name: Optional[str] = None) -> Any:
 
         name = _resolve_model_name(model_name)
         try:
-            _model_singleton = Reranker(name)
+            _model_singleton = Reranker(name, **_model_kwargs_from_env())
             logger.info("loaded cross-encoder reranker: %s", name)
         except Exception as e:  # noqa: BLE001 — load is best-effort
             logger.warning(
