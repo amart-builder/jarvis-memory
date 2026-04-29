@@ -880,6 +880,82 @@ def test_multi_session_min_rel_lowered_to_005():
     assert FILTER_CONFIG["multi-session"]["min_rel"] == 0.05
 
 
+def test_ms_counting_filter_keeps_top_candidates_below_min_rel():
+    """Phase 9: MS counting keeps recall candidates instead of threshold-dropping them."""
+    from scripts.run_longmemeval import apply_adaptive_filter
+
+    hits = [
+        {"uuid": f"h{i}", "score": 0.20 if i < 4 else 0.01}
+        for i in range(25)
+    ]
+
+    out = apply_adaptive_filter(
+        hits,
+        category="multi-session",
+        counting=True,
+    )
+
+    assert [h["uuid"] for h in out] == [f"h{i}" for i in range(20)]
+
+
+def test_ms_non_counting_filter_still_uses_min_rel():
+    """Phase 9 must not widen unrelated multi-session questions."""
+    from scripts.run_longmemeval import apply_adaptive_filter
+
+    hits = [
+        {"uuid": f"h{i}", "score": 0.20 if i < 5 else 0.01}
+        for i in range(25)
+    ]
+
+    out = apply_adaptive_filter(
+        hits,
+        category="multi-session",
+        counting=False,
+    )
+
+    assert [h["uuid"] for h in out] == [f"h{i}" for i in range(5)]
+
+
+def test_knowledge_update_retrieval_recency_boost_still_has_max_res(monkeypatch):
+    """Phase 9 refactor must not break the KU recency branch."""
+    import scripts.run_longmemeval as adapter
+
+    hits = [
+        {
+            "uuid": f"lme_q_ku__{i:03d}_sid{i}",
+            "id": f"lme_q_ku__{i:03d}_sid{i}",
+            "content": f"note {i}",
+            "score": 0.2,
+            "similarity": 0.2,
+            "referenced_date": f"2023-01-{i + 1:02d}",
+            "created_at": f"2023-01-{i + 1:02d}",
+            "note_index": i,
+        }
+        for i in range(4)
+    ]
+
+    import jarvis_memory.scoring as scoring
+    import jarvis_memory.search.keyword as keyword
+
+    monkeypatch.setattr(scoring, "scored_search", lambda **kw: list(hits))
+    monkeypatch.setattr(keyword, "keyword_search", lambda **kw: [])
+    monkeypatch.setattr(adapter, "lme_weighted_rerank", lambda candidates, **kw: candidates)
+    monkeypatch.setattr(adapter, "classify_lme_intent", lambda q: "semantic")
+    monkeypatch.setattr(adapter, "channel_weights", lambda category, intent: (1.0, 1.0))
+
+    out = adapter.retrieve_with_omega_recipe(
+        query="where do I keep my old sneakers now?",
+        group_id="lme_q_ku",
+        category="knowledge-update",
+        counting=False,
+        driver=None,
+        embedding_store=None,
+        chroma_collection=type("C", (), {"query": lambda self, **kw: {}})(),
+    )
+
+    assert len(out) == 4
+
+
 def test_multisession_prompt_has_stage2_enumeration_discipline():
     """The MS prompt includes the new Stage 2 enumeration rules and final-line format."""
     from scripts.longmemeval.prompts import RAG_PROMPT_MULTISESSION

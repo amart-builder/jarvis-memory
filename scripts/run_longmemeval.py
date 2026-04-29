@@ -430,6 +430,35 @@ def trim_to_context_budget(
     return kept
 
 
+def apply_adaptive_filter(
+    hits: list[dict[str, Any]],
+    *,
+    category: str,
+    counting: bool,
+) -> list[dict[str, Any]]:
+    """Apply OMEGA-style per-category filtering.
+
+    Phase 9: multi-session counting is the exception. The Phase 8 error
+    atlas showed repeated cases where a gold session was retrieved
+    upstream, then dropped solely because its score fell below
+    ``min_rel``. Counting questions prefer recall: the two-pass MS
+    prompt can enumerate and dedupe, but it cannot recover a missing
+    event.
+    """
+    cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
+    min_rel = float(cfg["min_rel"])
+    min_res = int(cfg["min_res"])
+    max_res = int(cfg["max_res"])
+
+    if category == "multi-session" and counting:
+        return hits[:max_res]
+
+    above = [h for h in hits if _hit_score(h) >= min_rel]
+    if len(above) >= min_res:
+        return above[:max_res]
+    return hits[:max(min_res, len(hits))][:max_res]
+
+
 # ── Stage 0: gold-session retrieval diagnostics ───────────────────────
 
 
@@ -1156,22 +1185,19 @@ def retrieve_with_omega_recipe(
     _snap("temporal_boost", primary)
 
     # Apply OMEGA's adaptive filter (per-category min_rel / min_res / max_res).
-    cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
-    min_rel = float(cfg["min_rel"])
-    min_res = int(cfg["min_res"])
-    max_res = int(cfg["max_res"])
-
-    # Keep top max_res; ensure at least min_res survive even if scores
-    # are all below min_rel — better noisy context than empty.
-    above = [h for h in primary if _hit_score(h) >= min_rel]
-    if len(above) >= min_res:
-        kept = above[:max_res]
-    else:
-        kept = primary[:max(min_res, len(primary))][:max_res]
+    # Phase 9 keeps top candidates for MS counting instead of threshold-dropping
+    # low-score events that the two-pass enumerator can still use.
+    kept = apply_adaptive_filter(
+        primary,
+        category=category,
+        counting=counting,
+    )
     _snap("filtered", kept)
 
     # Recency boost for knowledge-update — OMEGA recipe (line 945).
     if category == "knowledge-update" and kept:
+        cfg = FILTER_CONFIG.get(category, FILTER_CONFIG["single-session-user"])
+        max_res = int(cfg["max_res"])
         # Sort by note_index ascending so we know the oldest/newest.
         with_idx = sorted(
             kept, key=lambda h: int(h.get("note_index") or 0)
