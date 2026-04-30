@@ -1,6 +1,8 @@
 # Client Install Guide
 
-> **Who this is for:** a user (or an agent acting on behalf of a user) setting up a fresh Jarvis-Memory install on a single machine — Mac Mini, MacBook, or Linux VPS. Everything is opt-in; you can bolt on integrations (Claude Code, Codex, Minions) à la carte.
+> **Who this is for:** a user setting up a fresh Jarvis Memory install on a single machine — Mac Mini, MacBook, or Linux VPS. Everything is opt-in; you can bolt on integrations (Claude Code, Codex, OpenClaw, Minions) à la carte.
+>
+> **Agents:** read [`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md) first. Audit the user's actual system before deciding topology.
 >
 > **How long this takes:** 5–10 minutes on a fast connection. Most of the wall-clock is a one-time 90 MB download of the embedding model.
 
@@ -94,11 +96,13 @@ source .venv/bin/activate
 python -m jarvis_memory.api &      # REST API on localhost:3500
 curl -X POST localhost:3500/api/v2/save_episode \
   -H 'Content-Type: application/json' \
-  -d '{"group_id":"smoke","content":"it works","type":"fact"}'
-curl 'localhost:3500/api/v2/scored_search?group_id=smoke&query=works'
+  -d '{"group_id":"smoke","content":"[FACT] Jarvis Memory smoke test works.","episode_type":"fact"}'
+curl -X POST localhost:3500/api/v2/scored_search \
+  -H 'Content-Type: application/json' \
+  -d '{"group_id":"smoke","query":"smoke test","limit":5}'
 ```
 
-If the second curl returns your `"it works"` episode, you're done.
+If the second curl returns your smoke-test episode, you're done.
 
 ---
 
@@ -108,7 +112,7 @@ Each of these is a single command you can run now or later. They don't depend on
 
 ### Claude Code — MCP server
 
-Lets Claude Code call the 27 Jarvis-Memory tools directly from any session. Adds an entry to `~/.claude/settings.json`.
+Lets Claude Code call the 29 Jarvis Memory tools directly from any session. Adds an entry to `~/.claude/settings.json`.
 
 ```bash
 python scripts/register_mcp.py --client claude-code        # install
@@ -256,6 +260,8 @@ rm -rf ~/.jarvis-memory/                    # wipes ChromaDB + logs
 
 ## For agents installing this for a user
 
+Read [`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md) before making topology decisions. The runbook is the source of truth for agent-led installs.
+
 If you're an OpenClaw / Claude Code / Codex agent driving this install on behalf of a user:
 
 1. The user should be watching you at step 3 (they need to paste credentials).
@@ -269,5 +275,5 @@ If you're an OpenClaw / Claude Code / Codex agent driving this install on behalf
 ## What's next after install
 
 - Read [`README.md`](README.md) for the architecture + API reference.
-- Your agent can now use MCP tools like `save_episode`, `scored_search`, `wake_up`, `session_handoff`. Full list: `python -m mcp_server.server --list-tools` or see the `## MCP tools` section in the README.
+- Your agent can now use MCP tools like `save_episode`, `scored_search`, `wake_up`, `session_handoff`, and `doctor`. The surface is parity-locked at 29 tools in `tests/test_mcp_parity.py`.
 - Integrate with your own scripts via the REST API at `localhost:3500/api/v2/*`.

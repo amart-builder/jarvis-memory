@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Long Mem Eval Leaderboard</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #1d1d1f;
+    --text-muted: #6e6e73;
+    --text-faint: #86868b;
+    --line: #d2d2d7;
+    --line-soft: #ebebef;
+  }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif;
+    font-weight: 400;
+    line-height: 1.45;
+    letter-spacing: -0.012em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "ss01", "cv11", "tnum";
+  }
+
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 96px 40px 72px;
+  }
+
+  .mono {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 500;
+  }
+
+  header {
+    margin-bottom: 56px;
+  }
+
+  h1 {
+    margin-top: 32px;
+    font-size: 64px;
+    line-height: 1.03;
+    font-weight: 600;
+    letter-spacing: -0.035em;
+    color: var(--text);
+  }
+
+  .subtitle {
+    max-width: 660px;
+    margin-top: 22px;
+    color: var(--text-muted);
+    font-size: 21px;
+    line-height: 1.38;
+    font-weight: 400;
+    letter-spacing: -0.018em;
+  }
+
+  .divider {
+    border: 0;
+    height: 1px;
+    width: 260px;
+    margin: 64px auto;
+    background: linear-gradient(90deg, transparent 0%, #c8c8cc 50%, transparent 100%);
+  }
+
+  .leaderboard {
+    width: 100%;
+  }
+
+  .table-head,
+  .row {
+    display: grid;
+    grid-template-columns: 64px minmax(220px, 1fr) 190px minmax(260px, 1.2fr);
+    column-gap: 28px;
+    align-items: baseline;
+  }
+
+  .table-head {
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .table-head div {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 500;
+  }
+
+  .row {
+    min-height: 66px;
+    padding: 18px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .row:last-child {
+    border-bottom-color: var(--line);
+  }
+
+  .rank {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    color: var(--text-faint);
+    font-size: 13px;
+    letter-spacing: 0.02em;
+  }
+
+  .system {
+    font-size: 24px;
+    font-weight: 500;
+    letter-spacing: -0.025em;
+  }
+
+  .score {
+    font-size: 24px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .notes {
+    color: var(--text-muted);
+    font-size: 16px;
+    letter-spacing: -0.006em;
+  }
+
+  .row.top {
+    padding-top: 24px;
+    padding-bottom: 24px;
+  }
+
+  .row.top .rank,
+  .row.top .system,
+  .row.top .score {
+    color: var(--text);
+  }
+
+  .row.top .system,
+  .row.top .score {
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: -0.032em;
+  }
+
+  .note {
+    max-width: 700px;
+    margin-top: 32px;
+    color: var(--text-faint);
+    font-size: 13px;
+    line-height: 1.6;
+    letter-spacing: -0.003em;
+  }
+
+  @media (max-width: 820px) {
+    main {
+      padding: 72px 24px 56px;
+    }
+
+    h1 {
+      font-size: 44px;
+      letter-spacing: -0.03em;
+    }
+
+    .subtitle {
+      font-size: 19px;
+    }
+
+    .table-head {
+      display: none;
+    }
+
+    .row {
+      grid-template-columns: 44px 1fr;
+      row-gap: 8px;
+      column-gap: 16px;
+      align-items: start;
+    }
+
+    .rank {
+      grid-row: span 3;
+      padding-top: 4px;
+    }
+
+    .system,
+    .score,
+    .notes,
+    .row.top .system,
+    .row.top .score {
+      font-size: 22px;
+      text-align: left;
+    }
+
+    .notes {
+      font-size: 15px;
+    }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="mono">Raw score / correct out of 500</span>
+    <h1>Long Mem Eval Leaderboard</h1>
+    <p class="subtitle">The leading benchmark for testing AI agent memory systems.</p>
+  </header>
+
+  <hr class="divider">
+
+  <section class="leaderboard" aria-label="Long Mem Eval raw score leaderboard">
+    <div class="table-head" aria-hidden="true">
+      <div>Rank</div>
+      <div>System</div>
+      <div style="text-align: right;">Score</div>
+      <div>Notes</div>
+    </div>
+
+    <div class="row top">
+      <div class="rank">01</div>
+      <div class="system">Jarvis Memory</div>
+      <div class="score">97.6%</div>
+      <div class="notes">Built solo by Alexander Martin</div>
+    </div>
+
+    <div class="row">
+      <div class="rank">02</div>
+      <div class="system">Agent Memory V4</div>
+      <div class="score">96.2%</div>
+      <div class="notes">Built by AI researcher Jordan McCann</div>
+    </div>
+
+    <div class="row">
+      <div class="rank">03</div>
+      <div class="system">Chronos</div>
+      <div class="score">95.6%</div>
+      <div class="notes">PwC-funded research team</div>
+    </div>
+
+    <div class="row">
+      <div class="rank">04</div>
+      <div class="system">Mastra</div>
+      <div class="score">93.6%</div>
+      <div class="notes">YC-backed startup</div>
+    </div>
+
+    <div class="row">
+      <div class="rank">05</div>
+      <div class="system">Mem0</div>
+      <div class="score">93.4%</div>
+      <div class="notes">YC S24; founded by a Tesla Autopilot infra lead</div>
+    </div>
+
+    <div class="row">
+      <div class="rank">06</div>
+      <div class="system">Omega</div>
+      <div class="score">93.2%</div>
+      <div class="notes">Built by Futuri CTO Jason Sosa</div>
+    </div>
+
+    <div class="row">
+      <div class="rank">07</div>
+      <div class="system">Gbrain</div>
+      <div class="score">84.0%</div>
+      <div class="notes">Built by YC CEO Garry Tan (architecture-based estimate)</div>
+    </div>
+
+    <div class="row">
+      <div class="rank">08</div>
+      <div class="system">Zep</div>
+      <div class="score">71.2%</div>
+      <div class="notes">YC W24; built the Graphiti temporal knowledge graph</div>
+    </div>
+  </section>
+
+  <p class="note">
+    Scores are shown as raw correct-answer percentage out of 500 questions. Retrieval-only metrics
+    and task-weighted headline scores are not used as leaderboard values.
+  </p>
+</main>
+</body>
+</html>

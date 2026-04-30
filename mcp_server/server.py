@@ -1,6 +1,6 @@
 """Jarvis Memory MCP Server — semantic search, typed graph, temporal facts.
 
-27 tools total (see tests/test_mcp_parity.py for the locked name set).
+29 tools total (see tests/test_mcp_parity.py for the locked name set).
 Tool surface is frozen by parity tests; additions or renames require a PR
 that bumps the count there.
 

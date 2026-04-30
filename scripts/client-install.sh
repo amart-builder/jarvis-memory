@@ -229,7 +229,7 @@ fi
 # --- 9. MCP integrations (optional — Claude Code + Codex) ---
 say "MCP integrations — optional, per-client"
 cat <<'EOF'
-  Jarvis-Memory ships an MCP server exposing 27 tools. Any MCP-speaking
+  Jarvis Memory ships an MCP server exposing 29 tools. Any MCP-speaking
   client (Claude Code, Codex CLI, Claude Desktop) can consume them.
   This step writes a registration into each client's config file; skip
   anything you don't use.
@@ -271,8 +271,10 @@ cat <<EOF
   Write + search a test episode:
     curl -X POST localhost:3500/api/v2/save_episode \\
       -H 'Content-Type: application/json' \\
-      -d '{"group_id":"smoke","content":"it works","type":"fact"}'
-    curl 'localhost:3500/api/v2/scored_search?group_id=smoke&query=works'
+      -d '{"group_id":"smoke","content":"[FACT] Jarvis Memory smoke test works.","episode_type":"fact"}'
+    curl -X POST localhost:3500/api/v2/scored_search \\
+      -H 'Content-Type: application/json' \\
+      -d '{"group_id":"smoke","query":"smoke test","limit":5}'
 
   Update to the latest release:
     scripts/upgrade.sh

@@ -208,3 +208,96 @@ class TestRunDreamCycle:
         ])
         out = engine.run_dream_cycle()
         assert set(out.keys()) >= {"fix_citations", "orphans", "stale_edges"}
+
+
+# ── Daily digest semantic-dedup safeguards ──────────────────────────────
+
+
+class _FakeEmbedStore:
+    """Test double for EmbeddingStore. Tracks search() invocation count."""
+
+    def __init__(self, returns: list[dict] | None = None, sleep_per_call: float = 0.0):
+        self.calls = 0
+        self._returns = returns or []
+        self._sleep = sleep_per_call
+
+    def health_check(self) -> bool:
+        return True
+
+    def search(self, query: str, limit: int = 5):
+        self.calls += 1
+        if self._sleep:
+            time.sleep(self._sleep)
+        return list(self._returns)
+
+
+def _engine_with_embed(embed_store, scripts):
+    e = CompactionEngine.__new__(CompactionEngine)
+    e._driver = _FakeDriver(scripts)
+    e._owns_driver = False
+    e._graphiti = None
+    e._embed_store = embed_store
+    return e
+
+
+class TestDailyDigestSafeguards:
+    """Pin the safety net around the expensive semantic dedup pass."""
+
+    @staticmethod
+    def _mems(n: int) -> list[dict]:
+        return [
+            {
+                "uuid": f"m-{i}",
+                "content": f"unique content number {i}",
+                "name": "",
+                "memory_type": "fact",
+            }
+            for i in range(n)
+        ]
+
+    def test_flag_disabled_skips_pass_2_entirely(self, monkeypatch):
+        """JARVIS_SEMANTIC_DEDUP=0 must not call embed_store.search()."""
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_ENABLED", False)
+
+        embed = _FakeEmbedStore()
+        rows = self._mems(50)
+        engine = _engine_with_embed(embed, [
+            (lambda c: "MATCH (n)" in c and "compaction_daily_run IS NULL" in c, rows),
+        ])
+
+        report = engine.daily_digest()
+        assert embed.calls == 0
+        assert "merged_count" in report
+
+    def test_timeout_aborts_long_loop(self, monkeypatch):
+        """Wall-clock cap aborts Pass 2 mid-loop instead of running forever."""
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_ENABLED", True)
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_TIMEOUT_SEC", 1)
+
+        embed = _FakeEmbedStore(sleep_per_call=0.4)
+        rows = self._mems(20)
+        engine = _engine_with_embed(embed, [
+            (lambda c: "MATCH (n)" in c and "compaction_daily_run IS NULL" in c, rows),
+        ])
+
+        start = time.monotonic()
+        report = engine.daily_digest()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 4.0
+        assert 1 <= embed.calls < 20
+        assert "merged_count" in report
+
+    def test_default_flag_runs_pass_2(self, monkeypatch):
+        """With the flag on and timeout high enough, Pass 2 runs normally."""
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_ENABLED", True)
+        monkeypatch.setattr("jarvis_memory.compaction.SEMANTIC_DEDUP_TIMEOUT_SEC", 60)
+
+        embed = _FakeEmbedStore(returns=[])
+        rows = self._mems(3)
+        engine = _engine_with_embed(embed, [
+            (lambda c: "MATCH (n)" in c and "compaction_daily_run IS NULL" in c, rows),
+        ])
+
+        engine.daily_digest()
+        assert embed.calls == 3
