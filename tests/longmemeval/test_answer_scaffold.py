@@ -177,3 +177,44 @@ def test_from_whom_scaffold_answers_source_relation_for_jewelry_question():
     assert rows == 1
     assert "crystal chandelier" in scaffold
     assert "Required answer from scaffold rows: my aunt" in scaffold
+
+
+def test_daily_health_device_scaffold_excludes_accessories_and_supplies():
+    hits = [
+        {
+            "content": (
+                "user: I've been wearing my Fitbit Versa 3 smartwatch non-stop.\n"
+                "user: I have behind-the-ear hearing aids from Phonak, and I've been relying on these hearing aids a lot lately.\n"
+                "user: I've been using a sleep mask, earplugs, and a white noise machine.\n"
+            ),
+            "referenced_date": "2023-05-22T01:37:00",
+        },
+        {
+            "content": (
+                "user: I've been testing my blood sugar levels three times a day with my Accu-Chek Aviva Nano system.\n"
+                "user: I've been using a pill box with alarms, a thermometer, a scale, and a blood pressure monitor.\n"
+            ),
+            "referenced_date": "2023-05-27T10:21:00",
+        },
+        {
+            "content": (
+                "user: I've been doing inhalation treatments twice a day with my nebulizer machine.\n"
+                "user: I've been using a humidifier, saline nasal spray, and nasal strip.\n"
+            ),
+            "referenced_date": "2023-05-30T19:15:00",
+        },
+    ]
+
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question="How many health-related devices do I use in a day?",
+        category="multi-session",
+    )
+
+    assert rows == 4
+    assert "Fitbit Versa 3" in scaffold
+    assert "Phonak BTE hearing aids" in scaffold
+    assert "Accu-Chek Aviva Nano blood glucose meter" in scaffold
+    assert "nebulizer machine" in scaffold
+    assert "sleep mask" not in scaffold
+    assert "Required count from scaffold rows: 4" in scaffold

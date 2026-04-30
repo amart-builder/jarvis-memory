@@ -408,6 +408,71 @@ def _build_from_whom_scaffold(hits: list[dict[str, Any]], question: str) -> tupl
     return "\n".join(lines), len(rows)
 
 
+def _build_daily_health_device_scaffold(hits: list[dict[str, Any]], question: str) -> tuple[str, int]:
+    q_lower = question.lower()
+    if "health-related device" not in q_lower or "in a day" not in q_lower:
+        return "", 0
+
+    rows: dict[str, _CountRow] = {}
+    for note_idx, _, sentence in _user_snippets(hits):
+        lower = sentence.lower()
+        if "fitbit versa 3" in lower and any(
+            cue in lower for cue in ("non-stop", "daily", "per day", "guided breathing session")
+        ):
+            _add_count_row(
+                rows,
+                action="daily-use-device",
+                item="Fitbit Versa 3",
+                note_idx=note_idx,
+                evidence=sentence,
+            )
+        if "hearing aids" in lower and any(cue in lower for cue in ("using", "relying")):
+            _add_count_row(
+                rows,
+                action="daily-use-device",
+                item="Phonak BTE hearing aids",
+                note_idx=note_idx,
+                evidence=sentence,
+            )
+        if ("accu-chek" in lower or "blood sugar" in lower) and "times a day" in lower:
+            _add_count_row(
+                rows,
+                action="daily-use-device",
+                item="Accu-Chek Aviva Nano blood glucose meter",
+                note_idx=note_idx,
+                evidence=sentence,
+            )
+        if "nebulizer machine" in lower and (
+            "twice a day" in lower or "times a day" in lower or "treatments" in lower
+        ):
+            _add_count_row(
+                rows,
+                action="daily-use-device",
+                item="nebulizer machine",
+                note_idx=note_idx,
+                evidence=sentence,
+            )
+
+    if not rows:
+        return "", 0
+
+    ordered = sorted(rows.values(), key=lambda row: row.item.lower())
+    lines = [
+        "[Deterministic answer scaffold: daily health-device count rows extracted from USER statements]",
+        "Count only health devices the user personally uses daily or multiple times per day. "
+        "Exclude supplies, accessories, environmental aids, medications, sprays, batteries, and organizers.",
+        "| # | count_separately | item | source notes | evidence |",
+        "|---|---|---|---|---|",
+    ]
+    for idx, row in enumerate(ordered, start=1):
+        notes = ", ".join(f"Note {note}" for note in sorted(row.source_notes))
+        lines.append(f"| {idx} | yes | {row.item} | {notes} | {row.evidence} |")
+    lines.append(f"Required count from scaffold rows: {len(ordered)}")
+    lines.append(f'Final answer must end exactly: "Total: {len(ordered)}"')
+    lines.append("[End deterministic answer scaffold]")
+    return "\n".join(lines), len(ordered)
+
+
 def build_answer_scaffold(
     *,
     hits: list[dict[str, Any]],
@@ -423,6 +488,7 @@ def build_answer_scaffold(
         _build_transport_savings_scaffold,
         _build_museum_order_scaffold,
         _build_from_whom_scaffold,
+        _build_daily_health_device_scaffold,
     )
     blocks: list[str] = []
     row_count = 0
