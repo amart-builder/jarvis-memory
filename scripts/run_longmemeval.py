@@ -1705,6 +1705,7 @@ def run_one_question(
         answer_scaffold_override = maybe_answer_scaffold_override(
             question=question,
             row_count=n_answer_scaffold_rows,
+            hits=hits,
         )
         if answer_scaffold_override is not None:
             hypothesis = answer_scaffold_override

@@ -368,3 +368,102 @@ def test_music_acquisition_scaffold_counts_source_note_rows_not_unique_titles():
         )
         is None
     )
+
+
+def test_numeric_override_scaffold_computes_sephora_points_delta():
+    hits = [
+        {
+            "content": (
+                "user: I recently bought an eyeshadow palette at Sephora and earned "
+                "50 points, bringing my total to 200 points so far.\n"
+            ),
+            "referenced_date": "2023-05-21T12:19:00",
+        },
+        {
+            "content": (
+                "user: By the way, I'm really close to redeeming a free skincare "
+                "product from Sephora, I just need a total of 300 points and I'm all set!\n"
+            ),
+            "referenced_date": "2023-05-29T08:31:00",
+        },
+    ]
+
+    question = "How many points do I need to earn to redeem a free skincare product at Sephora?"
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question=question,
+        category="multi-session",
+    )
+
+    assert rows == 1
+    assert "Required answer: 100" in scaffold
+    assert maybe_answer_scaffold_override(
+        question=question,
+        row_count=rows,
+        hits=hits,
+    ) == "100"
+
+
+def test_numeric_override_scaffold_uses_latest_current_to_watch_count():
+    hits = [
+        {
+            "content": "user: I've got a pretty long to-watch list right now, with 20 titles.\n",
+            "referenced_date": "2023-05-20T10:19:00",
+        },
+        {
+            "content": (
+                "user: I've got a lot of titles on my to-watch list, currently 25, "
+                "and I'm always looking to add more.\n"
+                "user: I'm definitely going to add \"Amistad\" and \"Hotel Rwanda\" "
+                "to my to-watch list.\n"
+            ),
+            "referenced_date": "2023-05-22T03:27:00",
+        },
+    ]
+
+    question = "How many titles are currently on my to-watch list?"
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question=question,
+        category="knowledge-update",
+    )
+
+    assert rows == 1
+    assert "Required answer: 25" in scaffold
+    assert "27" not in scaffold
+    assert maybe_answer_scaffold_override(
+        question=question,
+        row_count=rows,
+        hits=hits,
+    ) == "25"
+
+
+def test_numeric_override_scaffold_uses_latest_instagram_follower_count():
+    hits = [
+        {
+            "content": "user: I've got 1250 followers on Instagram now.\n",
+            "referenced_date": "2023-05-25T05:26:00",
+        },
+        {
+            "content": (
+                "user: I've been meaning to check my current follower count - "
+                "I think I'm close to 1300 now.\n"
+            ),
+            "referenced_date": "2023-05-25T09:28:00",
+        },
+    ]
+
+    question = "How many followers do I have on Instagram now?"
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question=question,
+        category="knowledge-update",
+    )
+
+    assert rows == 1
+    assert "Required answer: 1300" in scaffold
+    assert maybe_answer_scaffold_override(
+        question=question,
+        row_count=rows,
+        hits=hits,
+    ) == "1300"
