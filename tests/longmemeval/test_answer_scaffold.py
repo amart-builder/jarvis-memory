@@ -507,3 +507,87 @@ def test_role_title_mismatch_scaffold_abstains_on_nonmatching_role():
     )
     assert override is not None
     assert "not Software Engineer Manager" in override
+
+
+def test_aggregate_override_scaffold_sums_charity_money_by_source_note():
+    hits = [
+        {
+            "content": (
+                "user: I just ran 5 kilometers in the \"Run for Hunger\" charity "
+                "event on March 12th and raised $250 for a local food bank.\n"
+            ),
+            "referenced_date": "2023-03-20T08:00:00",
+        },
+        {
+            "content": (
+                "user: I recently volunteered at a charity bake sale and we raised "
+                "$1,000 for the local children's hospital!\n"
+            ),
+            "referenced_date": "2023-03-20T04:17:00",
+        },
+        {
+            "content": (
+                "user: I completed a charity fitness challenge in February and "
+                "managed to raise $500 for the American Cancer Society.\n"
+            ),
+            "referenced_date": "2023-03-20T18:35:00",
+        },
+        {
+            "content": (
+                "user: I helped raise $2,000 for a local animal shelter on January 20th.\n"
+                "user: Like I said, I helped raise over $2,000 for a local animal shelter.\n"
+            ),
+            "referenced_date": "2023-03-20T19:19:00",
+        },
+    ]
+
+    question = "How much money did I raise for charity in total?"
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question=question,
+        category="multi-session",
+    )
+
+    assert rows == 1
+    assert "Required answer: $3,750" in scaffold
+    assert maybe_answer_scaffold_override(
+        question=question,
+        row_count=rows,
+        hits=hits,
+    ) == "$3,750"
+
+
+def test_aggregate_override_scaffold_sums_franchise_watch_weeks():
+    hits = [
+        {
+            "content": (
+                "user: I watched all 22 Marvel Cinematic Universe movies in two weeks.\n"
+            ),
+            "referenced_date": "2023-05-23T23:17:00",
+        },
+        {
+            "content": (
+                "user: I just finished a Star Wars marathon, watched all the main "
+                "films in a week and a half.\n"
+            ),
+            "referenced_date": "2023-05-25T21:00:00",
+        },
+    ]
+
+    question = (
+        "How many weeks did it take me to watch all the Marvel Cinematic Universe "
+        "movies and the main Star Wars films?"
+    )
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question=question,
+        category="multi-session",
+    )
+
+    assert rows == 1
+    assert "Required answer: 3.5 weeks" in scaffold
+    assert maybe_answer_scaffold_override(
+        question=question,
+        row_count=rows,
+        hits=hits,
+    ) == "3.5 weeks"
