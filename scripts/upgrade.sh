@@ -22,15 +22,22 @@ cd "$REPO_ROOT"
 
 ROLLING=0
 PIN_TAG=""
-for arg in "$@"; do
-    case "$arg" in
-        --rolling) ROLLING=1 ;;
-        --to)      shift; PIN_TAG="${1:?--to requires a tag argument}" ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --rolling)
+            ROLLING=1
+            shift
+            ;;
+        --to)
+            shift
+            PIN_TAG="${1:?--to requires a tag argument}"
+            shift
+            ;;
         -h|--help)
             sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "Unknown arg: $arg (--help for usage)" >&2; exit 2 ;;
+        *) echo "Unknown arg: $1 (--help for usage)" >&2; exit 2 ;;
     esac
 done
 
