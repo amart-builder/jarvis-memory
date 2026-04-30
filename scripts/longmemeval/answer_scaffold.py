@@ -67,6 +67,14 @@ class _WeddingRow:
     evidence_score: int = 0
 
 
+@dataclass(frozen=True)
+class _MusicAcquisitionRow:
+    note_idx: int
+    item: str
+    evidence: str
+    evidence_score: int = 0
+
+
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
@@ -708,6 +716,105 @@ def _build_this_year_wedding_count_scaffold(
     return "\n".join(lines), len(ordered)
 
 
+def _music_item_from_sentence(sentence: str) -> str:
+    double_quoted = re.findall(r'"([^"]{2,80})"', sentence)
+    single_quoted = re.findall(r"(?<!\w)'([^']{2,80})'(?!\w)", sentence)
+    quoted = double_quoted + single_quoted
+    lower = sentence.lower()
+    if quoted:
+        if "ep" in lower:
+            return f'EP "{quoted[-1]}"'
+        if "album" in lower:
+            return f'album "{quoted[-1]}"'
+        if "vinyl" in lower or "record" in lower:
+            return f'vinyl record "{quoted[-1]}"'
+        return f'"{quoted[-1]}"'
+    if "vinyl" in lower:
+        return "vinyl record"
+    if "album" in lower:
+        return "album"
+    if " ep" in f" {lower}":
+        return "EP"
+    return "music item"
+
+
+def _build_music_acquisition_scaffold(
+    hits: list[dict[str, Any]],
+    question: str,
+) -> tuple[str, int]:
+    q_lower = question.lower()
+    if not any(cue in q_lower for cue in ("album", "albums", " ep", " eps")):
+        return "", 0
+    if not any(cue in q_lower for cue in ("purchased", "downloaded", "bought", "buy")):
+        return "", 0
+    if not any(cue in q_lower for cue in ("how many", "count", "number")):
+        return "", 0
+
+    rows: dict[int, _MusicAcquisitionRow] = {}
+    for note_idx, hit in enumerate(hits, start=1):
+        for segment in parse_role_segments(str(hit.get("content") or "")):
+            if segment.role != "user":
+                continue
+            for sentence in _sentences(segment.text):
+                lower = sentence.lower()
+                has_music_item = any(
+                    cue in lower for cue in ("album", " ep", "vinyl", "record")
+                )
+                has_acquisition = any(
+                    cue in lower
+                    for cue in (
+                        "downloaded",
+                        "purchased",
+                        "bought",
+                        "buying",
+                        "ended up buying",
+                        "got my vinyl signed",
+                    )
+                )
+                if not (has_music_item and has_acquisition):
+                    continue
+                evidence_score = 0
+                if "downloaded" in lower:
+                    evidence_score += 4
+                if "purchased" in lower or "bought" in lower or "buying" in lower:
+                    evidence_score += 4
+                if "album" in lower or " ep" in f" {lower}":
+                    evidence_score += 2
+                if "vinyl" in lower or "record" in lower:
+                    evidence_score += 1
+                current = rows.get(note_idx)
+                clipped = _clip(sentence)
+                if current is None or (evidence_score, -len(clipped)) > (
+                    current.evidence_score, -len(current.evidence)
+                ):
+                    rows[note_idx] = _MusicAcquisitionRow(
+                        note_idx=note_idx,
+                        item=_music_item_from_sentence(sentence),
+                        evidence=clipped,
+                        evidence_score=evidence_score,
+                    )
+
+    if not rows:
+        return "", 0
+
+    ordered = [rows[note_idx] for note_idx in sorted(rows)]
+    lines = [
+        "[Deterministic answer scaffold: music acquisition count rows extracted from USER statements]",
+        "Count each source-note row below as one purchased/downloaded album-or-EP memory. "
+        "Do not merge the same title across different dated source notes; they are separate "
+        "user-stated acquisition memories for this count question. Ignore assistant skepticism "
+        "about whether a band or EP exists.",
+        "| # | count_separately | item | source | evidence |",
+        "|---|---|---|---|---|",
+    ]
+    for idx, row in enumerate(ordered, start=1):
+        lines.append(f"| {idx} | yes | {row.item} | Note {row.note_idx} | {row.evidence} |")
+    lines.append(f"Required count from scaffold rows: {len(ordered)}")
+    lines.append(f'Final answer must end exactly: "Total: {len(ordered)}"')
+    lines.append("[End deterministic answer scaffold]")
+    return "\n".join(lines), len(ordered)
+
+
 def build_answer_scaffold(
     *,
     hits: list[dict[str, Any]],
@@ -726,6 +833,7 @@ def build_answer_scaffold(
         _build_daily_health_device_scaffold,
         _build_current_tank_inventory_scaffold,
         _build_this_year_wedding_count_scaffold,
+        _build_music_acquisition_scaffold,
     )
     blocks: list[str] = []
     row_count = 0

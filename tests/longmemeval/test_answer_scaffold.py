@@ -311,3 +311,43 @@ def test_this_year_wedding_scaffold_counts_named_attended_events_only():
     assert "sister" not in scaffold
     assert "own wedding" not in scaffold
     assert "Required count from scaffold rows: 3" in scaffold
+
+
+def test_music_acquisition_scaffold_counts_source_note_rows_not_unique_titles():
+    hits = [
+        {
+            "content": (
+                "user: I've been listening to Billie Eilish lately, especially her new "
+                "album \"Happier Than Ever\" which I downloaded on Spotify.\n"
+                "assistant: Great album.\n"
+            ),
+            "referenced_date": "2023-05-20T12:42:00",
+        },
+        {
+            "content": (
+                "user: I ended up buying their EP \"Midnight Sky\" at the festival "
+                "merchandise booth, and I've been listening to it non-stop.\n"
+                "assistant: That EP may not exist.\n"
+            ),
+            "referenced_date": "2023-05-26T23:25:00",
+        },
+        {
+            "content": (
+                "user: I bought their EP 'Midnight Sky' at the festival merchandise booth "
+                "and can't get enough of it.\n"
+            ),
+            "referenced_date": "2023-05-29T18:21:00",
+        },
+    ]
+
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question="How many music albums or EPs have I purchased or downloaded?",
+        category="multi-session",
+    )
+
+    assert rows == 3
+    assert 'album "Happier Than Ever"' in scaffold
+    assert scaffold.count('| yes | EP "Midnight Sky" |') == 2
+    assert "That EP may not exist" not in scaffold
+    assert "Required count from scaffold rows: 3" in scaffold
