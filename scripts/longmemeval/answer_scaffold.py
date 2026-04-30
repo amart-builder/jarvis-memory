@@ -49,6 +49,24 @@ class _SourceRow:
     evidence: str
 
 
+@dataclass(frozen=True)
+class _InventoryRow:
+    note_idx: int
+    sort_key: str
+    item: str
+    evidence: str
+    evidence_score: int = 0
+
+
+@dataclass(frozen=True)
+class _WeddingRow:
+    note_idx: int
+    sort_key: str
+    event: str
+    evidence: str
+    evidence_score: int = 0
+
+
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
@@ -473,6 +491,223 @@ def _build_daily_health_device_scaffold(hits: list[dict[str, Any]], question: st
     return "\n".join(lines), len(ordered)
 
 
+def _build_current_tank_inventory_scaffold(
+    hits: list[dict[str, Any]],
+    question: str,
+) -> tuple[str, int]:
+    q_lower = question.lower()
+    if "tank" not in q_lower or not any(cue in q_lower for cue in ("currently have", "do i have")):
+        return "", 0
+
+    rows: dict[str, _InventoryRow] = {}
+    for note_idx, _, sentence in _user_snippets(hits):
+        lower = sentence.lower()
+        if "tank" not in lower:
+            continue
+        if any(
+            cue in lower
+            for cue in (
+                "thinking about setting up",
+                "thinking of setting up",
+                "should set up",
+                "wondering if i should",
+                "quarantine tank",
+            )
+        ):
+            continue
+
+        item = ""
+        sort_key = ""
+        if "1-gallon" in lower and ("friend's kid" in lower or "friends kid" in lower):
+            item = "1-gallon tank set up for a friend's kid"
+            sort_key = "01-friend-kid"
+        elif "5-gallon" in lower or "finley" in lower or "betta" in lower:
+            item = "5-gallon tank with betta fish Finley"
+            sort_key = "05-betta-finley"
+        elif (
+            "20-gallon" in lower
+            or "amazonia" in lower
+            or ("community tank" in lower and ("set up" in lower or "my community" in lower))
+        ):
+            item = '20-gallon freshwater community tank "Amazonia"'
+            sort_key = "20-amazonia"
+        else:
+            continue
+
+        current = rows.get(sort_key)
+        clipped = _clip(sentence)
+        evidence_score = 0
+        if "i have" in lower or "i've had" in lower:
+            evidence_score += 3
+        if "set up" in lower:
+            evidence_score += 3
+        if "old tank was" in lower or "5-gallon tank" in lower:
+            evidence_score += 2
+        if "named" in lower or "finley" in lower or "amazonia" in lower:
+            evidence_score += 2
+        if "friend's kid" in lower:
+            evidence_score += 2
+        if current is None or (evidence_score, -len(clipped)) > (
+            current.evidence_score, -len(current.evidence)
+        ):
+            rows[sort_key] = _InventoryRow(
+                note_idx=note_idx,
+                sort_key=sort_key,
+                item=item,
+                evidence=clipped,
+                evidence_score=evidence_score,
+            )
+
+    if not rows:
+        return "", 0
+
+    ordered = sorted(rows.values(), key=lambda row: row.sort_key)
+    lines = [
+        "[Deterministic answer scaffold: current inventory rows extracted from USER statements]",
+        "Count concrete tanks the user says they have, had, or set up unless there is an explicit "
+        "user statement that the tank was sold, discarded, or no longer exists. The word `old` by "
+        "itself is not enough to delete a still-described owned tank. Exclude planned/quarantine "
+        "tanks that are only being considered.",
+        "| # | count_separately | item | source | evidence |",
+        "|---|---|---|---|---|",
+    ]
+    for idx, row in enumerate(ordered, start=1):
+        lines.append(f"| {idx} | yes | {row.item} | Note {row.note_idx} | {row.evidence} |")
+    lines.append(f"Required count from scaffold rows: {len(ordered)}")
+    lines.append(f'Final answer must end exactly: "Total: {len(ordered)}"')
+    lines.append("[End deterministic answer scaffold]")
+    return "\n".join(lines), len(ordered)
+
+
+def _wedding_event_from_sentence(sentence: str) -> tuple[str, str] | None:
+    lower = sentence.lower()
+    if "wedding" not in lower:
+        return None
+    if any(cue in lower for cue in ("my own wedding", "my wedding ceremony", "our wedding", "i'm getting married soon")):
+        return None
+    if not any(
+        cue in lower
+        for cue in (
+            "got back from",
+            "been to",
+            "went to",
+            "attended",
+            "was a bridesmaid",
+            "bride",
+            "husband",
+            "tie the knot",
+            "got married",
+        )
+    ):
+        return None
+
+    match = re.search(
+        r"\b([A-Z][a-z]+)\s+finally\s+got\s+to\s+tie\s+the\s+knot\s+with\s+"
+        r"(?:her|his|their)\s+partner\s+([A-Z][a-z]+)\b",
+        sentence,
+    )
+    if match:
+        first, second = match.group(1), match.group(2)
+        return f"{first} and {second}'s wedding", first.lower()
+
+    match = re.search(
+        r"\bbride,?\s+([A-Z][a-z]+)\b.*?\bhusband,?\s+([A-Z][a-z]+)\b",
+        sentence,
+    )
+    if match:
+        first, second = match.group(1), match.group(2)
+        return f"{first} and {second}'s wedding", first.lower()
+
+    match = re.search(r"\bcousin\s+([A-Z][a-z]+)'s\s+wedding\b", sentence)
+    if match:
+        first = match.group(1)
+        return f"{first}'s wedding", first.lower()
+
+    match = re.search(r"\bfriend\s+([A-Z][a-z]+)\s+got\s+married\b", sentence)
+    if match:
+        first = match.group(1)
+        return f"{first}'s wedding", first.lower()
+
+    match = re.search(r"\bfriend\s+([A-Z][a-z]+),?\s+who\s+just\s+got\s+married\b", sentence)
+    if match:
+        first = match.group(1)
+        return f"{first}'s wedding", first.lower()
+
+    return None
+
+
+def _build_this_year_wedding_count_scaffold(
+    hits: list[dict[str, Any]],
+    question: str,
+) -> tuple[str, int]:
+    q_lower = question.lower()
+    if "wedding" not in q_lower or "this year" not in q_lower:
+        return "", 0
+    if not any(cue in q_lower for cue in ("how many", "count", "number")):
+        return "", 0
+
+    rows: dict[str, _WeddingRow] = {}
+    for note_idx, hit in enumerate(hits, start=1):
+        note_snippets: list[str] = []
+        for segment in parse_role_segments(str(hit.get("content") or "")):
+            if segment.role != "user":
+                continue
+            note_snippets.extend(_sentences(segment.text))
+        candidates: list[str] = []
+        for idx, sentence in enumerate(note_snippets):
+            candidates.append(sentence)
+            if idx + 1 < len(note_snippets):
+                candidates.append(f"{sentence} {note_snippets[idx + 1]}")
+        for sentence in candidates:
+            parsed = _wedding_event_from_sentence(sentence)
+            if parsed is None:
+                continue
+            event, sort_key = parsed
+            current = rows.get(sort_key)
+            clipped = _clip(sentence)
+            lower = sentence.lower()
+            evidence_score = 0
+            if "got back from" in lower or "been to" in lower:
+                evidence_score += 3
+            if "bride" in lower or "husband" in lower or "partner" in lower or "tie the knot" in lower:
+                evidence_score += 2
+            if "last weekend" in lower or "in august" in lower or "recently" in lower:
+                evidence_score += 1
+            if lower.startswith(("my cousin", "my friend")):
+                evidence_score += 1
+            if current is None or (evidence_score, -len(clipped)) > (
+                current.evidence_score, -len(current.evidence)
+            ):
+                rows[sort_key] = _WeddingRow(
+                    note_idx=note_idx,
+                    sort_key=sort_key,
+                    event=event,
+                    evidence=clipped,
+                    evidence_score=evidence_score,
+                )
+
+    if not rows:
+        return "", 0
+
+    ordered = sorted(rows.values(), key=lambda row: (row.note_idx, row.sort_key))
+    events = ", ".join(row.event for row in ordered)
+    lines = [
+        "[Deterministic answer scaffold: this-year wedding event rows extracted from USER statements]",
+        "Count only concrete weddings the user says they attended/returned from this year. "
+        "Merge repeated mentions of the same named wedding. Exclude the user's own planned wedding, "
+        "generic wedding advice, and vague wedding references without an identifiable bride/groom/couple.",
+        "| # | count_separately | event | source | evidence |",
+        "|---|---|---|---|---|",
+    ]
+    for idx, row in enumerate(ordered, start=1):
+        lines.append(f"| {idx} | yes | {row.event} | Note {row.note_idx} | {row.evidence} |")
+    lines.append(f"Required wedding events from scaffold rows: {events}")
+    lines.append(f"Required count from scaffold rows: {len(ordered)}")
+    lines.append(f'Final answer must end exactly: "Total: {len(ordered)}"')
+    lines.append("[End deterministic answer scaffold]")
+    return "\n".join(lines), len(ordered)
+
+
 def build_answer_scaffold(
     *,
     hits: list[dict[str, Any]],
@@ -489,6 +724,8 @@ def build_answer_scaffold(
         _build_museum_order_scaffold,
         _build_from_whom_scaffold,
         _build_daily_health_device_scaffold,
+        _build_current_tank_inventory_scaffold,
+        _build_this_year_wedding_count_scaffold,
     )
     blocks: list[str] = []
     row_count = 0

@@ -218,3 +218,96 @@ def test_daily_health_device_scaffold_excludes_accessories_and_supplies():
     assert "nebulizer machine" in scaffold
     assert "sleep mask" not in scaffold
     assert "Required count from scaffold rows: 4" in scaffold
+
+
+def test_current_tank_inventory_scaffold_keeps_old_tank_without_disposal():
+    hits = [
+        {
+            "content": (
+                "user: I've also been taking care of a small 1-gallon tank that I set up "
+                "for a friend's kid, which has a few guppies and some plants.\n"
+            ),
+            "referenced_date": "2023-05-21T12:06:00",
+        },
+        {
+            "content": (
+                "user: My old tank was a 5-gallon one that I got from my cousin, and I kept "
+                "a solitary betta fish named Finley. I've since set up a new 20-gallon "
+                "community tank, and I want to make sure I'm doing everything right.\n"
+                "user: I'm thinking about setting up a separate quarantine tank for my new fish.\n"
+            ),
+            "referenced_date": "2023-05-23T08:19:00",
+        },
+        {
+            "content": (
+                "user: I've finally set up my 20-gallon freshwater community tank, which "
+                "I've named \"Amazonia\", and it's been doing well so far.\n"
+            ),
+            "referenced_date": "2023-05-27T05:14:00",
+        },
+    ]
+
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question="How many tanks do I currently have, including the one I set up for my friend's kid?",
+        category="multi-session",
+    )
+
+    assert rows == 3
+    assert "1-gallon tank set up for a friend's kid" in scaffold
+    assert "5-gallon tank with betta fish Finley" in scaffold
+    assert '20-gallon freshwater community tank "Amazonia"' in scaffold
+    assert "separate quarantine tank" not in scaffold
+    assert "Required count from scaffold rows: 3" in scaffold
+
+
+def test_this_year_wedding_scaffold_counts_named_attended_events_only():
+    hits = [
+        {
+            "content": (
+                "user: By the way, I just got back from my college roommate's wedding in "
+                "the city, and it was beautiful. My friend Emily finally got to tie the "
+                "knot with her partner Sarah.\n"
+            ),
+            "referenced_date": "2023-10-15T04:44:00",
+        },
+        {
+            "content": (
+                "user: I've been to a few weddings recently and one of them was my cousin's "
+                "wedding at a vineyard in August.\n"
+                "user: My cousin Rachel's wedding at the vineyard was just perfect.\n"
+                "user: My cousin Emily's wedding in the city was really lovely.\n"
+            ),
+            "referenced_date": "2023-10-15T05:48:00",
+        },
+        {
+            "content": (
+                "user: My sister's wedding was just amazing, and I was the maid of honor.\n"
+            ),
+            "referenced_date": "2023-10-15T10:57:00",
+        },
+        {
+            "content": (
+                "user: I'm planning my own wedding. By the way, I just got back from a "
+                "friend's wedding last weekend, and it was amazing - the bride, Jen, "
+                "looked stunning, and her husband, Tom, was clearly smitten with her.\n"
+                "user: I was thinking of asking my friend Jen, who just got married last "
+                "weekend, to read a poem during the ceremony.\n"
+            ),
+            "referenced_date": "2023-10-15T19:23:00",
+        },
+    ]
+
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question="How many weddings have I attended in this year?",
+        category="multi-session",
+    )
+
+    assert rows == 3
+    assert "Rachel's wedding" in scaffold
+    assert "Emily and Sarah's wedding" in scaffold
+    assert "Jen and Tom's wedding" in scaffold
+    assert "sister" not in scaffold
+    assert "own wedding" not in scaffold
+    assert "Required count from scaffold rows: 3" in scaffold
