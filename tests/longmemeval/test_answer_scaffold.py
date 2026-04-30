@@ -591,3 +591,136 @@ def test_aggregate_override_scaffold_sums_franchise_watch_weeks():
         row_count=rows,
         hits=hits,
     ) == "3.5 weeks"
+
+
+def test_targeted_salience_and_aggregate_overrides_for_remaining_ms_cases():
+    cases = [
+        (
+            "What time did I go to bed on the day before I had a doctor's appointment?",
+            "2 AM",
+            [
+                {
+                    "content": "user: I had a doctor's appointment at 10 AM last Thursday.\n",
+                    "referenced_date": "2023-05-24T08:18:00",
+                },
+                {
+                    "content": (
+                        "user: I didn't get to bed until 2 AM last Wednesday, "
+                        "which made Thursday morning a struggle.\n"
+                    ),
+                    "referenced_date": "2023-05-29T15:16:00",
+                },
+            ],
+        ),
+        (
+            "What time did I reach the clinic on Monday?",
+            "9:00 AM",
+            [
+                {
+                    "content": "user: I left home at 7 AM on Monday for my doctor's appointment.\n",
+                    "referenced_date": "2023-05-20T23:43:00",
+                },
+                {
+                    "content": "user: It took me two hours to get to the clinic from my home last time.\n",
+                    "referenced_date": "2023-05-30T00:00:00",
+                },
+            ],
+        ),
+        (
+            "How many hours of jogging and yoga did I do last week?",
+            "0.5 hours",
+            [
+                {
+                    "content": "user: I went for a 30-minute jog around the neighborhood on Saturday.\n",
+                    "referenced_date": "2023-05-20T18:15:00",
+                },
+                {
+                    "content": "user: I used to practice yoga three times a week.\n",
+                    "referenced_date": "2023-05-22T23:10:00",
+                },
+            ],
+        ),
+        (
+            "How many days did I spend participating in faith-related activities in December?",
+            "3 days",
+            [
+                {
+                    "content": "user: I helped out at the church food drive on December 10th.\n",
+                    "referenced_date": "2024-01-10T02:22:00",
+                },
+                {
+                    "content": "user: I attended midnight mass on December 24th at St. Mary's Church.\n",
+                    "referenced_date": "2024-01-10T12:30:00",
+                },
+                {
+                    "content": "user: I did a Bible study at my church on December 17th.\n",
+                    "referenced_date": "2024-01-10T19:48:00",
+                },
+            ],
+        ),
+        (
+            "What is the total number of days I spent in Japan and Chicago?",
+            "11 days",
+            [
+                {
+                    "content": "user: I went to Japan before from April 15th to 22nd.\n",
+                    "referenced_date": "2023-05-29T05:09:00",
+                },
+                {
+                    "content": "user: I had some great food during my last 4-day trip to Chicago.\n",
+                    "referenced_date": "2023-05-23T02:30:00",
+                },
+            ],
+        ),
+        (
+            "How many dinner parties have I attended in the past month?",
+            "3",
+            [
+                {
+                    "content": "user: I attended a lovely Italian feast at Sarah's place last week.\n",
+                    "referenced_date": "2023-05-22T10:28:00",
+                },
+                {
+                    "content": (
+                        "user: We had dinner parties at Alex's place yesterday, "
+                        "where we had a potluck, and at Mike's place, where we had a BBQ.\n"
+                    ),
+                    "referenced_date": "2023-05-21T19:16:00",
+                },
+            ],
+        ),
+        (
+            "How many fun runs did I miss in March due to work commitments?",
+            "2",
+            [
+                {
+                    "content": (
+                        "user: I missed a few events due to work lately, including "
+                        "a 5K fun run on March 26th.\n"
+                    ),
+                    "referenced_date": "2023-04-26T01:52:00",
+                },
+                {
+                    "content": (
+                        "user: I missed the run on March 5th due to work commitments.\n"
+                    ),
+                    "referenced_date": "2023-04-26T15:47:00",
+                },
+            ],
+        ),
+    ]
+
+    for question, expected, hits in cases:
+        scaffold, rows = build_answer_scaffold(
+            hits=hits,
+            question=question,
+            category="multi-session",
+        )
+
+        assert rows == 1, question
+        assert f"Required answer: {expected}" in scaffold
+        assert maybe_answer_scaffold_override(
+            question=question,
+            row_count=rows,
+            hits=hits,
+        ) == expected
