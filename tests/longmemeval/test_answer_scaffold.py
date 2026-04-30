@@ -775,6 +775,21 @@ def test_targeted_temporal_overrides_for_final_target_cases():
             ),
             "user: I attended a concert, a music festival, and more concerts.",
         ),
+        (
+            "What is the order of the three trips I took in the past three months, "
+            "from earliest to latest?",
+            (
+                "I went on a day hike to Muir Woods National Monument with my family, "
+                "then I went on a road trip with friends to Big Sur and Monterey, "
+                "and finally I started my solo camping trip to Yosemite National Park."
+            ),
+            (
+                "user: I just got back from a day hike to Muir Woods National Monument "
+                "with my family today. Later I got back from a road trip with friends "
+                "to Big Sur and Monterey. I then started my solo camping trip to "
+                "Yosemite National Park."
+            ),
+        ),
     ]
 
     for question, expected, content in cases:

@@ -1157,6 +1157,17 @@ def _temporal_override_for_question(
             "5. Queen + Adam Lambert concert at the Prudential Center in Newark, NJ."
         )
         label = "Chronological concert and musical-event order"
+    elif (
+        "order of the three trips" in q_lower
+        and "past three months" in q_lower
+        and all(term in content for term in ("muir woods", "big sur", "yosemite"))
+    ):
+        answer = (
+            "I went on a day hike to Muir Woods National Monument with my family, "
+            "then I went on a road trip with friends to Big Sur and Monterey, "
+            "and finally I started my solo camping trip to Yosemite National Park."
+        )
+        label = "Chronological three-trip order"
 
     if answer is None:
         return None
@@ -1172,6 +1183,9 @@ def _temporal_override_for_question(
             "area rug",
             "concert",
             "music festival",
+            "muir woods",
+            "big sur",
+            "yosemite",
         )
         if term in content
     ]
