@@ -804,9 +804,31 @@ def test_total_line_appended_when_missing_from_ms_count():
         "- oranges [Note 5]\n"
         "- pears [Note 7]\n"
     )
-    out = maybe_append_total_line(hyp, "multi-session", counting=True)
+    out = maybe_append_total_line(
+        hyp,
+        "multi-session",
+        counting=True,
+        question="How many fruits did I buy?",
+    )
     assert "Total: 3" in out
     assert out.startswith(hyp.rstrip())  # original list intact
+
+
+def test_total_line_not_appended_for_how_much_difference():
+    """Money/difference answers can contain lists but should not get Total:N."""
+    from scripts.run_longmemeval import maybe_append_total_line
+    hyp = (
+        "- Maui resort: over $300 per night\n"
+        "- Tokyo hostel: around $30 per night\n"
+        "Difference: over $270 per night"
+    )
+    out = maybe_append_total_line(
+        hyp,
+        "multi-session",
+        counting=True,
+        question="How much more did I spend in Hawaii compared to Tokyo?",
+    )
+    assert out == hyp
 
 
 def test_total_line_skipped_when_already_present():

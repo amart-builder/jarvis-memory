@@ -251,9 +251,19 @@ _LIST_ITEM_RE = re.compile(
 _TOTAL_LINE_RE = re.compile(
     r"(?im)^\s*(?:total|count|answer)\s*[:\-=]\s*(\d+)\b",
 )
+_TOTAL_LINE_COUNT_QUESTION_RE = re.compile(
+    r"\b(?:how many|number of|count|total number)\b",
+    re.IGNORECASE,
+)
 
 
-def maybe_append_total_line(hypothesis: str, category: str, counting: bool) -> str:
+def maybe_append_total_line(
+    hypothesis: str,
+    category: str,
+    counting: bool,
+    *,
+    question: str | None = None,
+) -> str:
     """Defensive: ensure MS counting answers end with 'Total: N'.
 
     Stage 2 prompt rule says the FINAL line MUST be "Total: N". gpt-4.1
@@ -277,6 +287,8 @@ def maybe_append_total_line(hypothesis: str, category: str, counting: bool) -> s
     if category != "multi-session" or not counting:
         return hypothesis
     if not hypothesis or not hypothesis.strip():
+        return hypothesis
+    if question is not None and not _TOTAL_LINE_COUNT_QUESTION_RE.search(question):
         return hypothesis
 
     # Already has a total/count/answer-N line? Leave alone.
@@ -1715,7 +1727,12 @@ def run_one_question(
         # questions when the LLM forgot the "Total: N" final line. No-op
         # for any other category or non-counting MS question.
         hypothesis_pre_post = hypothesis
-        hypothesis = maybe_append_total_line(hypothesis, category, counting)
+        hypothesis = maybe_append_total_line(
+            hypothesis,
+            category,
+            counting,
+            question=question,
+        )
         total_line_appended = hypothesis != hypothesis_pre_post
 
         elapsed = time.time() - t0
