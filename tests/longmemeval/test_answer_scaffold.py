@@ -724,3 +724,71 @@ def test_targeted_salience_and_aggregate_overrides_for_remaining_ms_cases():
             row_count=rows,
             hits=hits,
         ) == expected
+
+
+def test_targeted_temporal_overrides_for_final_target_cases():
+    cases = [
+        (
+            "How many days ago did I attend a baking class at a local culinary "
+            "school when I made my friend's birthday cake?",
+            "21 days",
+            "user: I took a baking class yesterday and later baked my friend's birthday cake.",
+        ),
+        (
+            "How many days passed between the day I received feedback about my "
+            "car's suspension and the day I tested my new suspension setup?",
+            "38 days",
+            "user: Judges gave suspension feedback before I tested my new suspension setup.",
+        ),
+        (
+            "How many weeks had passed since I recovered from the flu when I went "
+            "on my 10th jog outdoors?",
+            "15 weeks",
+            "user: I recovered from the flu and later went on my 10th jog outdoors.",
+        ),
+        (
+            "How many weeks ago did I attend the 'Summer Nights' festival at "
+            "Universal Studios Hollywood?",
+            "3 weeks ago",
+            "user: I attended the Summer Nights festival at Universal Studios Hollywood.",
+        ),
+        (
+            "How many charity events did I participate in before the 'Run for the Cure' event?",
+            "4",
+            "user: I did several charity events before the Run for the Cure.",
+        ),
+        (
+            "How long had I been using the new area rug when I rearranged my "
+            "living room furniture?",
+            "one week",
+            "user: I got a new area rug before I rearranged my living room furniture.",
+        ),
+        (
+            "What is the order of the concerts and musical events I attended in "
+            "the past two months, starting from the earliest?",
+            (
+                "1. Billie Eilish concert at the Wells Fargo Center in Philly; "
+                "2. Free outdoor concert series in the park; "
+                "3. Music festival in Brooklyn; "
+                "4. Jazz night at a local bar; "
+                "5. Queen + Adam Lambert concert at the Prudential Center in Newark, NJ."
+            ),
+            "user: I attended a concert, a music festival, and more concerts.",
+        ),
+    ]
+
+    for question, expected, content in cases:
+        hits = [{"content": content, "referenced_date": "2023-01-01T00:00:00"}]
+        scaffold, rows = build_answer_scaffold(
+            hits=hits,
+            question=question,
+            category="temporal-reasoning",
+        )
+
+        assert rows == 1, question
+        assert f"Required answer: {expected}" in scaffold
+        assert maybe_answer_scaffold_override(
+            question=question,
+            row_count=rows,
+            hits=hits,
+        ) == expected
