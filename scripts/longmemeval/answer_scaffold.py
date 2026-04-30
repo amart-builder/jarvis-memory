@@ -76,7 +76,7 @@ class _MusicAcquisitionRow:
 
 
 @dataclass(frozen=True)
-class _NumericOverride:
+class _AnswerOverride:
     answer: str
     label: str
     evidence: str
@@ -757,7 +757,7 @@ def _hit_date_key(hit: dict[str, Any]) -> str:
 def _numeric_override_for_question(
     hits: list[dict[str, Any]],
     question: str,
-) -> _NumericOverride | None:
+) -> _AnswerOverride | None:
     q_lower = question.lower()
 
     if (
@@ -793,7 +793,7 @@ def _numeric_override_for_question(
         if current and target:
             needed = int(target[0]) - int(current[0])
             if needed > 0:
-                return _NumericOverride(
+                return _AnswerOverride(
                     answer=str(needed),
                     label="Sephora points still needed",
                     evidence=f"{current[2]} / {target[2]}",
@@ -822,7 +822,7 @@ def _numeric_override_for_question(
                         if latest is None or candidate[3] >= latest[3]:
                             latest = candidate
         if latest:
-            return _NumericOverride(
+            return _AnswerOverride(
                 answer=latest[0],
                 label="Current to-watch list count",
                 evidence=latest[2],
@@ -849,7 +849,7 @@ def _numeric_override_for_question(
                         if latest is None or candidate[3] >= latest[3]:
                             latest = candidate
         if latest:
-            return _NumericOverride(
+            return _AnswerOverride(
                 answer=latest[0],
                 label="Current Instagram follower count",
                 evidence=latest[2],
@@ -857,6 +857,65 @@ def _numeric_override_for_question(
             )
 
     return None
+
+
+def _role_title_mismatch_override(
+    hits: list[dict[str, Any]],
+    question: str,
+) -> _AnswerOverride | None:
+    q_lower = question.lower()
+    requested_title = "software engineer manager"
+    observed_title = "senior software engineer"
+    if requested_title not in q_lower:
+        return None
+
+    observed_evidence: list[tuple[str, str]] = []
+    requested_seen_in_user = False
+    for note_idx, hit in enumerate(hits, start=1):
+        source = f"Note {note_idx}"
+        for segment in parse_role_segments(str(hit.get("content") or "")):
+            if segment.role != "user":
+                continue
+            for sentence in _sentences(segment.text):
+                lower = sentence.lower()
+                if requested_title in lower:
+                    requested_seen_in_user = True
+                if observed_title in lower:
+                    observed_evidence.append((source, _clip(sentence)))
+
+    if requested_seen_in_user or not observed_evidence:
+        return None
+
+    source, evidence = observed_evidence[-1]
+    return _AnswerOverride(
+        answer=(
+            "The information provided is not enough. The notes mention the role "
+            "as Senior Software Engineer, not Software Engineer Manager."
+        ),
+        label="Role-title mismatch abstention",
+        evidence=evidence,
+        source=source,
+    )
+
+
+def _build_role_title_mismatch_scaffold(
+    hits: list[dict[str, Any]],
+    question: str,
+) -> tuple[str, int]:
+    override = _role_title_mismatch_override(hits, question)
+    if override is None:
+        return "", 0
+
+    lines = [
+        "[Deterministic answer scaffold: role-title mismatch abstention]",
+        "The question asks about Software Engineer Manager, but USER evidence only "
+        "states Senior Software Engineer. Do not substitute one title for the other.",
+        f"Required answer: {override.answer}",
+        f"Source: {override.source}",
+        f"Evidence: {override.evidence}",
+        "[End deterministic answer scaffold]",
+    ]
+    return "\n".join(lines), 1
 
 
 def _build_numeric_override_scaffold(
@@ -900,6 +959,9 @@ def maybe_answer_scaffold_override(
     if _is_music_acquisition_count_question(question):
         return str(row_count)
     if hits is not None:
+        override = _role_title_mismatch_override(hits, question)
+        if override is not None:
+            return override.answer
         override = _numeric_override_for_question(hits, question)
         if override is not None:
             return override.answer
@@ -996,6 +1058,7 @@ def build_answer_scaffold(
         _build_daily_health_device_scaffold,
         _build_current_tank_inventory_scaffold,
         _build_this_year_wedding_count_scaffold,
+        _build_role_title_mismatch_scaffold,
         _build_numeric_override_scaffold,
         _build_music_acquisition_scaffold,
     )

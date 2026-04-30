@@ -467,3 +467,43 @@ def test_numeric_override_scaffold_uses_latest_instagram_follower_count():
         row_count=rows,
         hits=hits,
     ) == "1300"
+
+
+def test_role_title_mismatch_scaffold_abstains_on_nonmatching_role():
+    hits = [
+        {
+            "content": (
+                "user: I lead a team of 4 engineers in my new role as Senior "
+                "Software Engineer.\n"
+            ),
+            "referenced_date": "2023-05-25T19:20:00",
+        },
+        {
+            "content": (
+                "user: I've been enjoying my role as Senior Software Engineer for "
+                "a while, especially the part where I now lead a team of five engineers.\n"
+            ),
+            "referenced_date": "2023-05-27T10:13:00",
+        },
+    ]
+
+    question = (
+        "How many engineers do I lead when I just started my new role as "
+        "Software Engineer Manager?"
+    )
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question=question,
+        category="knowledge-update",
+    )
+
+    assert rows == 1
+    assert "role-title mismatch" in scaffold
+    assert "not Software Engineer Manager" in scaffold
+    override = maybe_answer_scaffold_override(
+        question=question,
+        row_count=rows,
+        hits=hits,
+    )
+    assert override is not None
+    assert "not Software Engineer Manager" in override
