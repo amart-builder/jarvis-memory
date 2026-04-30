@@ -160,6 +160,10 @@ use ONLY the latest value. The earlier value is superseded.
 differently (e.g., "cousin's wedding" and "Rachel's wedding at a vineyard" may be the \
 same event). If two items could be the same, count them as ONE. Err on the side of \
 merging duplicates rather than double-counting.
+- PICKUP/RETURN ERRANDS: if the question asks how many clothing items/actions the \
+user needs to "pick up or return", count each unresolved user-stated pickup or return \
+obligation separately. A return and a pickup can both count even when they involve the \
+same garment/store; do not merge different obligations just because they are related.
 - For questions about an "increase", "decrease", or "change" in a quantity: you MUST find \
 BOTH the starting value AND the ending value, then compute the DIFFERENCE. Do NOT report \
 the final total as the increase. Example: if followers went from 250 to 350, the increase is 100.
@@ -290,6 +294,11 @@ described retrospectively — those are real events.
 - DEDUPLICATION: if two candidates describe the same underlying event/item \
 (e.g., "cousin's wedding" and "Rachel's wedding at a vineyard" — likely the \
 same wedding), MERGE into one. Err on the side of merging when borderline.
+- PICKUP/RETURN ERRANDS: if the question asks how many clothing items/actions \
+the user needs to "pick up or return", count each unresolved user-stated pickup \
+or return obligation separately. A return and a pickup can both count even when \
+they involve the same garment/store; do not merge different obligations just \
+because they are related.
 - USER STATEMENT BEATS ASSISTANT SKEPTICISM. If the user said they did the \
 thing, count it. Even if the assistant in the conversation expressed doubt.
 - Preserve quantities, units, and dates EXACTLY as the user stated them.
@@ -452,6 +461,12 @@ X did I do BEFORE event Y?" or "AFTER event Y?":
 did X" (e.g., "my 10th jog"), enumerate ALL occurrences of X in chronological \
 order, count to N, and report that occurrence's date. Then use that date for \
 any subsequent calculation in the question.
+- MUSEUM ORDER QUESTIONS: when the question asks for the order of museums visited, \
+count user statements about visiting, attending a lecture series, attending a \
+guided tour, seeing an exhibition, participating in a tour/lab, or taking someone \
+to a museum as museum visits. Extract the exact museum venue from the user's words, \
+preserve same-note mention order when dates tie, and do not replace the venue with \
+an exhibition title, a gallery, or a different nearby museum.
 
 Notes from past conversations:
 

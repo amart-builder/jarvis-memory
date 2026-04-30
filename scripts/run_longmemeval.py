@@ -34,6 +34,30 @@ import os
 import random
 import re
 import resource
+from pathlib import Path
+
+
+def _load_env_file() -> None:
+    """Load repo-local .env values for direct serial runner invocations."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 def _bump_fd_limit_if_low(target: int = 8192) -> None:
@@ -62,13 +86,13 @@ def _bump_fd_limit_if_low(target: int = 8192) -> None:
 
 
 _bump_fd_limit_if_low()
+_load_env_file()
 
 import sys
 import time
 import traceback
 from collections import Counter, defaultdict
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger("scripts.run_longmemeval")
@@ -88,6 +112,8 @@ from scripts.longmemeval.classifier import (  # noqa: E402
     classify_lme_intent,
     is_counting_question,
 )
+from scripts.longmemeval.answer_scaffold import build_answer_scaffold  # noqa: E402
+from scripts.longmemeval.evidence_ledger import build_evidence_ledger  # noqa: E402
 from scripts.longmemeval.prompts import (  # noqa: E402
     answer_to_str,
     format_session_for_prompt,
@@ -123,6 +149,13 @@ LME_OBSERVATION_TOP_K: int = int(os.getenv("JARVIS_LME_OBSERVATION_TOP_K", "10")
 # When set, extractions are cached in this SQLite DB — re-runs hit the
 # cache instead of re-calling gpt-4o-mini. Empty/unset → no caching.
 LME_EXTRACTION_CACHE_PATH: str = os.getenv("JARVIS_LME_EXTRACTION_CACHE_PATH", "").strip()
+# Phase 11 (2026-04-29): deterministic evidence ledgers. Experimental and
+# opt-in while the target-40 plan is still under review. Enable with
+# JARVIS_LME_EVIDENCE_LEDGER=1; default-off preserves exact Phase 10 parity.
+LME_EVIDENCE_LEDGER_ENABLED: bool = os.getenv("JARVIS_LME_EVIDENCE_LEDGER", "0") == "1"
+LME_ANSWER_SCAFFOLD_ENABLED: bool = (
+    os.getenv("JARVIS_LME_ANSWER_SCAFFOLD", os.getenv("JARVIS_LME_EVIDENCE_LEDGER", "0")) == "1"
+)
 
 DEFAULT_DATASET: Path = Path("data/longmemeval/longmemeval_s_cleaned.json")
 DEFAULT_ORACLE: Path = Path("data/longmemeval/longmemeval_oracle.json")
@@ -1418,6 +1451,10 @@ def run_one_question(
     lme_query_expanded = False
     # Stage 5 v2 Phase 8 default — populated when JARVIS_LME_OBSERVATIONS=1.
     n_observations = 0
+    # Phase 11 default — populated when the deterministic evidence ledger is on.
+    n_evidence_ledger_lines = 0
+    # Phase 11.1 default — populated when deterministic answer scaffolds are on.
+    n_answer_scaffold_rows = 0
 
     t0 = time.time()
     try:
@@ -1531,7 +1568,7 @@ def run_one_question(
                 )
 
         # 4. Format sessions block (shared across single-pass + two-pass).
-        sessions_text = "\n\n".join(
+        raw_sessions_text = "\n\n".join(
             format_session_for_prompt(
                 content=h.get("content", ""),
                 date_str=str(h.get("referenced_date") or h.get("created_at") or ""),
@@ -1539,6 +1576,32 @@ def run_one_question(
             )
             for i, h in enumerate(hits)
         )
+        prefix_blocks: list[str] = []
+
+        # 4.0a. Phase 11.1 — deterministic answer scaffolds for cases where
+        # GPT-4.1 needs structured bookkeeping more than more prose.
+        if LME_ANSWER_SCAFFOLD_ENABLED:
+            scaffold_block, n_answer_scaffold_rows = build_answer_scaffold(
+                hits=hits,
+                question=question,
+                category=category,
+            )
+            if scaffold_block:
+                prefix_blocks.append(scaffold_block)
+
+        # 4.0. Phase 11 — deterministic evidence ledger. Most Phase 10
+        # failures already had gold sessions in the final prompt, but the
+        # prompt was ~200k chars. The ledger lifts compact, question-matching
+        # user/assistant turns above the raw notes so answer synthesis has a
+        # smaller working surface. Raw notes remain available below.
+        if LME_EVIDENCE_LEDGER_ENABLED:
+            ledger_block, n_evidence_ledger_lines = build_evidence_ledger(
+                hits=hits,
+                question=question,
+                category=category,
+            )
+            if ledger_block:
+                prefix_blocks.append(ledger_block)
 
         # 4.1. Stage 5 v2 Phase 8 — prepend a structured-evidence block of
         # extracted observations BEFORE the chronological notes. The model
@@ -1558,7 +1621,9 @@ def run_one_question(
             n_observations = len(obs_hits)
             obs_block = format_observations_block(obs_hits)
             if obs_block:
-                sessions_text = obs_block + "\n\n" + sessions_text
+                prefix_blocks.append(obs_block)
+
+        sessions_text = "\n\n".join([*prefix_blocks, raw_sessions_text])
 
         # 4.5. Stage 1: confidence-based abstention guard. When retrieval
         # is weak AND the question names an entity nobody mentions, prepend
@@ -1667,6 +1732,8 @@ def run_one_question(
             ),
             "lme_query_expanded": lme_query_expanded,
             "n_observations": n_observations,
+            "n_evidence_ledger_lines": n_evidence_ledger_lines,
+            "n_answer_scaffold_rows": n_answer_scaffold_rows,
             "max_tokens": max_tokens,
             "answerer": answerer,
             # Stage 0: ``seed`` arg is honored only for OpenAI answerers
@@ -1709,6 +1776,8 @@ def run_one_question(
             ),
             "lme_query_expanded": lme_query_expanded,
             "n_observations": n_observations,
+            "n_evidence_ledger_lines": n_evidence_ledger_lines,
+            "n_answer_scaffold_rows": n_answer_scaffold_rows,
             "max_tokens": max_tokens,
             "answerer": answerer,
             "seed_honored": answerer in ("gpt4o", "gpt41"),
