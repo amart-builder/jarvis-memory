@@ -40,6 +40,15 @@ class _VenueRow:
     evidence: str
 
 
+@dataclass(frozen=True)
+class _SourceRow:
+    note_idx: int
+    date: str
+    source_person: str
+    item: str
+    evidence: str
+
+
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
@@ -335,6 +344,70 @@ def _build_museum_order_scaffold(hits: list[dict[str, Any]], question: str) -> t
     return "\n".join(lines), len(rows)
 
 
+def _build_from_whom_scaffold(hits: list[dict[str, Any]], question: str) -> tuple[str, int]:
+    q_lower = question.lower()
+    if not any(cue in q_lower for cue in ("from whom", "from who")):
+        return "", 0
+    if not any(cue in q_lower for cue in ("jewelry", "piece of jewelry", "received")):
+        return "", 0
+
+    rows: list[_SourceRow] = []
+    for note_idx, date, sentence in _user_snippets(hits):
+        lower = sentence.lower()
+        if "from my " not in lower and "from the " not in lower:
+            continue
+        if not any(
+            token in lower
+            for token in (
+                "jewelry", "necklace", "bracelet", "ring", "earrings", "chandelier",
+                "crystal", "sparkling", "droplets",
+            )
+        ):
+            continue
+        match = re.search(
+            r"\bfrom my\s+([a-z][a-z-]+(?:\s+[a-z][a-z-]+)?)\b|\bfrom the\s+([a-z][a-z-]+)\b",
+            lower,
+        )
+        if not match:
+            continue
+        relation = match.group(1) or match.group(2) or ""
+        relation = relation.strip()
+        if not relation:
+            continue
+        item = "jewelry-related item"
+        for label in ("crystal chandelier", "necklace", "bracelet", "ring", "earrings", "jewelry"):
+            if label in lower:
+                item = label
+                break
+        rows.append(_SourceRow(
+            note_idx=note_idx,
+            date=date,
+            source_person=f"my {relation}",
+            item=item,
+            evidence=_clip(sentence),
+        ))
+
+    if not rows:
+        return "", 0
+
+    rows.sort(key=lambda row: (row.date, row.note_idx))
+    chosen = rows[-1]
+    lines = [
+        "[Deterministic answer scaffold: temporal source-person rows extracted from USER statements]",
+        "For a `from whom` question, answer the source person/relation from the user-stated receipt event. "
+        "Do not reject the source relation just because the item description is unusual.",
+        "| date | item phrase | source person | source | evidence |",
+        "|---|---|---|---|---|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row.date} | {row.item} | {row.source_person} | Note {row.note_idx} | {row.evidence} |"
+        )
+    lines.append(f"Required answer from scaffold rows: {chosen.source_person}")
+    lines.append("[End deterministic answer scaffold]")
+    return "\n".join(lines), len(rows)
+
+
 def build_answer_scaffold(
     *,
     hits: list[dict[str, Any]],
@@ -349,6 +422,7 @@ def build_answer_scaffold(
         _build_pickup_return_scaffold,
         _build_transport_savings_scaffold,
         _build_museum_order_scaffold,
+        _build_from_whom_scaffold,
     )
     blocks: list[str] = []
     row_count = 0

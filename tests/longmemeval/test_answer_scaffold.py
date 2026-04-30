@@ -157,3 +157,23 @@ def test_museum_order_scaffold_sorts_today_before_recently_on_same_note():
 
     assert rows == 2
     assert "Required order from scaffold rows: Science Museum, Museum of Contemporary Art" in scaffold
+
+
+def test_from_whom_scaffold_answers_source_relation_for_jewelry_question():
+    hits = [{
+        "content": (
+            "user: By the way, I also got a stunning crystal chandelier from my aunt today, "
+            "which used to belong to my great-grandmother.\n"
+        ),
+        "referenced_date": "2023-03-04T16:45:00",
+    }]
+
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question="I received a piece of jewelry last Saturday from whom?",
+        category="temporal-reasoning",
+    )
+
+    assert rows == 1
+    assert "crystal chandelier" in scaffold
+    assert "Required answer from scaffold rows: my aunt" in scaffold
