@@ -67,6 +67,27 @@ def test_bus_taxi_scaffold_marks_missing_bus_user_price():
     assert "$10-$20" not in scaffold
 
 
+def test_transport_savings_scaffold_computes_train_vs_taxi_when_both_values_exist():
+    hits = [{
+        "content": (
+            "user: A taxi from the airport to my hotel would cost around $60.\n"
+            "user: I think it's actually $10 to get to my hotel from the airport by train.\n"
+        ),
+        "referenced_date": "2023-05-26T01:16:00",
+    }]
+
+    scaffold, rows = build_answer_scaffold(
+        hits=hits,
+        question="How much will I save by taking the train from the airport to my hotel instead of a taxi?",
+        category="multi-session",
+    )
+
+    assert rows == 2
+    assert "| train airport-to-hotel | $10 |" in scaffold
+    assert "| taxi airport-to-hotel | $60 |" in scaffold
+    assert "Final answer should state: $50" in scaffold
+
+
 def test_museum_order_scaffold_extracts_venues_and_skips_gallery_only_rows():
     hits = [
         {

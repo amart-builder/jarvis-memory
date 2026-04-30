@@ -159,9 +159,12 @@ def _build_pickup_return_scaffold(hits: list[dict[str, Any]], question: str) -> 
     return "\n".join(lines), len(ordered)
 
 
-def _build_bus_taxi_scaffold(hits: list[dict[str, Any]], question: str) -> tuple[str, int]:
+def _build_transport_savings_scaffold(hits: list[dict[str, Any]], question: str) -> tuple[str, int]:
     q_lower = question.lower()
-    if not all(token in q_lower for token in ("save", "bus", "taxi", "airport", "hotel")):
+    if not all(token in q_lower for token in ("save", "taxi", "airport", "hotel")):
+        return "", 0
+    requested_modes = [mode for mode in ("bus", "train", "taxi") if mode in q_lower]
+    if len(requested_modes) < 2:
         return "", 0
 
     side_values: dict[str, list[tuple[str, int, str]]] = {"taxi": [], "bus": [], "train": []}
@@ -176,11 +179,11 @@ def _build_bus_taxi_scaffold(hits: list[dict[str, Any]], question: str) -> tuple
             if side in lower:
                 side_values[side].append((amounts[-1].replace(" ", ""), note_idx, _clip(sentence)))
 
-    taxi = side_values["taxi"][-1] if side_values["taxi"] else None
-    bus = side_values["bus"][-1] if side_values["bus"] else None
-    train = side_values["train"][-1] if side_values["train"] else None
-
-    if taxi is None and bus is None and train is None:
+    latest = {
+        side: values[-1] if values else None
+        for side, values in side_values.items()
+    }
+    if all(value is None for value in latest.values()):
         return "", 0
 
     lines = [
@@ -190,26 +193,49 @@ def _build_bus_taxi_scaffold(hits: list[dict[str, Any]], question: str) -> tuple
         "| required side | user-stated value | source | evidence |",
         "|---|---|---|---|",
     ]
-    if taxi:
-        lines.append(f"| taxi airport-to-hotel | {taxi[0]} | Note {taxi[1]} | {taxi[2]} |")
-    else:
-        lines.append("| taxi airport-to-hotel | MISSING | - | no user-stated taxi value found |")
-    if bus:
-        lines.append(f"| bus airport-to-hotel | {bus[0]} | Note {bus[1]} | {bus[2]} |")
-    else:
-        lines.append("| bus airport-to-hotel | MISSING | - | no user-stated bus value found |")
-    if train:
-        lines.append(f"| nearby non-answer: train airport-to-hotel | {train[0]} | Note {train[1]} | {train[2]} |")
+    for side in requested_modes:
+        value = latest[side]
+        if value:
+            lines.append(f"| {side} airport-to-hotel | {value[0]} | Note {value[1]} | {value[2]} |")
+        else:
+            lines.append(f"| {side} airport-to-hotel | MISSING | - | no user-stated {side} value found |")
 
-    if bus is None:
+    for side, value in latest.items():
+        if side not in requested_modes and value:
+            lines.append(f"| nearby non-answer: {side} airport-to-hotel | {value[0]} | Note {value[1]} | {value[2]} |")
+
+    missing = [side for side in requested_modes if latest[side] is None]
+    if missing:
+        missing_label = " and ".join(missing)
         lines.append(
-            "Required conclusion: not enough information to answer; the bus price is missing. "
-            "Do not compute bus-vs-taxi savings from a train price or assistant estimate."
+            f"Required conclusion: not enough information to answer; the {missing_label} price is missing. "
+            "Do not compute savings from a different transport mode or assistant estimate."
         )
-    elif taxi is None:
-        lines.append("Required conclusion: not enough information to answer; the taxi price is missing.")
+    elif "taxi" in requested_modes:
+        other_modes = [mode for mode in requested_modes if mode != "taxi"]
+        if other_modes:
+            mode = other_modes[0]
+            taxi_amount = latest["taxi"][0]  # type: ignore[index]
+            mode_amount = latest[mode][0]  # type: ignore[index]
+            try:
+                taxi_num = float(re.sub(r"[^0-9.]", "", taxi_amount.split("-")[0]))
+                mode_num = float(re.sub(r"[^0-9.]", "", mode_amount.split("-")[0]))
+                savings = taxi_num - mode_num
+                if savings.is_integer():
+                    savings_text = f"${int(savings)}"
+                else:
+                    savings_text = f"${savings:.2f}"
+                lines.append(
+                    f"Required calculation: taxi {taxi_amount} - {mode} {mode_amount} = {savings_text} saved."
+                )
+                lines.append(f"Final answer should state: {savings_text}")
+            except (ValueError, IndexError):
+                pass
     lines.append("[End deterministic answer scaffold]")
-    return "\n".join(lines), 2 + int(train is not None)
+    return "\n".join(lines), len(requested_modes) + sum(
+        1 for side, value in latest.items()
+        if side not in requested_modes and value is not None
+    )
 
 
 def _normalize_venue(raw: str) -> str:
@@ -321,7 +347,7 @@ def build_answer_scaffold(
 
     builders = (
         _build_pickup_return_scaffold,
-        _build_bus_taxi_scaffold,
+        _build_transport_savings_scaffold,
         _build_museum_order_scaffold,
     )
     blocks: list[str] = []
