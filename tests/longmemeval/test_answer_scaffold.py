@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from scripts.longmemeval.answer_scaffold import build_answer_scaffold
+from scripts.longmemeval.answer_scaffold import (
+    build_answer_scaffold,
+    maybe_answer_scaffold_override,
+)
 
 
 def test_pickup_return_scaffold_counts_different_obligations_separately():
@@ -351,3 +354,17 @@ def test_music_acquisition_scaffold_counts_source_note_rows_not_unique_titles():
     assert scaffold.count('| yes | EP "Midnight Sky" |') == 2
     assert "That EP may not exist" not in scaffold
     assert "Required count from scaffold rows: 3" in scaffold
+    assert (
+        maybe_answer_scaffold_override(
+            question="How many music albums or EPs have I purchased or downloaded?",
+            row_count=rows,
+        )
+        == "3"
+    )
+    assert (
+        maybe_answer_scaffold_override(
+            question="How many weddings did I attend this year?",
+            row_count=rows,
+        )
+        is None
+    )

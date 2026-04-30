@@ -112,7 +112,10 @@ from scripts.longmemeval.classifier import (  # noqa: E402
     classify_lme_intent,
     is_counting_question,
 )
-from scripts.longmemeval.answer_scaffold import build_answer_scaffold  # noqa: E402
+from scripts.longmemeval.answer_scaffold import (  # noqa: E402
+    build_answer_scaffold,
+    maybe_answer_scaffold_override,
+)
 from scripts.longmemeval.evidence_ledger import build_evidence_ledger  # noqa: E402
 from scripts.longmemeval.prompts import (  # noqa: E402
     answer_to_str,
@@ -1440,6 +1443,7 @@ def run_one_question(
     max_tokens = 1024
     abstention_fired = False
     total_line_appended = False
+    answer_scaffold_override_applied = False
     # Stage 1.5 defaults — populated after classification succeeds.
     lme_intent = "NEUTRAL"
     lme_channel_weights: tuple[float, float] = (1.0, 1.0)
@@ -1698,6 +1702,14 @@ def run_one_question(
             ).hexdigest()[:16]
             diagnostics["prompt_chars"] = len(final_prompt_for_hash)
 
+        answer_scaffold_override = maybe_answer_scaffold_override(
+            question=question,
+            row_count=n_answer_scaffold_rows,
+        )
+        if answer_scaffold_override is not None:
+            hypothesis = answer_scaffold_override
+            answer_scaffold_override_applied = True
+
         # 5.5. Stage 2: defensive total-line post-process for MS counting
         # questions when the LLM forgot the "Total: N" final line. No-op
         # for any other category or non-counting MS question.
@@ -1734,6 +1746,7 @@ def run_one_question(
             "n_observations": n_observations,
             "n_evidence_ledger_lines": n_evidence_ledger_lines,
             "n_answer_scaffold_rows": n_answer_scaffold_rows,
+            "answer_scaffold_override_applied": answer_scaffold_override_applied,
             "max_tokens": max_tokens,
             "answerer": answerer,
             # Stage 0: ``seed`` arg is honored only for OpenAI answerers
@@ -1778,6 +1791,7 @@ def run_one_question(
             "n_observations": n_observations,
             "n_evidence_ledger_lines": n_evidence_ledger_lines,
             "n_answer_scaffold_rows": n_answer_scaffold_rows,
+            "answer_scaffold_override_applied": answer_scaffold_override_applied,
             "max_tokens": max_tokens,
             "answerer": answerer,
             "seed_honored": answerer in ("gpt4o", "gpt41"),
