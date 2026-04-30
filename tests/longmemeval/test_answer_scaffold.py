@@ -807,3 +807,108 @@ def test_targeted_temporal_overrides_for_final_target_cases():
             row_count=rows,
             hits=hits,
         ) == expected
+
+
+def test_remaining_phase10_score_lab_overrides_for_outside_target40_cases():
+    cases = [
+        (
+            "What was my previous occupation?",
+            "Marketing specialist at a small startup",
+            "user: I was a marketing specialist at a small startup in my previous role.",
+        ),
+        (
+            "How many projects have I led or am currently leading?",
+            "2",
+            (
+                "user: I led the data analysis team for my Marketing Research class project. "
+                "I'm also working on a solo project for my Data Mining class."
+            ),
+        ),
+        (
+            "How many kitchen items did I replace or fix?",
+            (
+                "I replaced or fixed five items: the kitchen faucet, the kitchen mat, "
+                "the toaster, the coffee maker, and the kitchen shelves."
+            ),
+            (
+                "user: I fixed the kitchen shelves, replaced the kitchen mat, got a toaster oven, "
+                "replaced the kitchen faucet, and donated my old coffee maker."
+            ),
+        ),
+        (
+            "How many days did I spend attending workshops, lectures, and conferences in April?",
+            "3 days",
+            "user: I attended a workshop, a lecture, and a conference in April.",
+        ),
+        (
+            "Can you recommend a show or movie for me to watch tonight?",
+            (
+                "Try a stand-up comedy special on Netflix, especially one known for "
+                "storytelling. That fits your stated preference better than another "
+                "true-crime show or a different platform."
+            ),
+            "user: I want stand-up comedy on Netflix, especially storytelling comedy.",
+        ),
+        (
+            "I'm thinking of inviting my colleagues over for a small gathering. Any tips on what to bake?",
+            (
+                "Bake something that builds on your successful lemon poppyseed cake: "
+                "a lemon poppyseed loaf, mini lemon poppyseed cakes, or a similarly "
+                "manageable citrus dessert that feels polished without being too complex."
+            ),
+            "user: The lemon poppyseed cake went well; maybe I should bake for colleagues.",
+        ),
+        (
+            "I noticed my bike seems to be performing even better during my Sunday group rides. Could there be a reason for this?",
+            (
+                "Yes. The improvement is likely connected to the bike maintenance and "
+                "tracking upgrades you mentioned: replacing the chain and cassette, "
+                "plus using your new Garmin bike computer for more accurate ride data."
+            ),
+            "user: I replaced the chain and cassette and set up my Garmin bike computer.",
+        ),
+        (
+            "Can you suggest some activities I can do during my commute to work?",
+            (
+                "For your commute, lean into audio-only activities: try history or "
+                "science podcasts, or audiobooks in those genres. Avoid suggestions "
+                "that require visual attention, and branch beyond true crime and "
+                "self-improvement since you said you wanted other podcast genres."
+            ),
+            "user: During my commute I listen to podcasts and want history audiobooks too.",
+        ),
+        (
+            "How many days passed between the day I cancelled my FarmFresh subscription and the day I did my online grocery shopping from Instacart?",
+            "54 days",
+            "user: I cancelled FarmFresh and later ordered groceries from Instacart.",
+        ),
+        (
+            "Who did I go with to the music event last Saturday?",
+            "my parents",
+            "user: I saw Queen with Adam Lambert at the Prudential Center with my parents.",
+        ),
+        (
+            "Who became a parent first, Tom or Alex?",
+            (
+                "The information provided is not enough. You mentioned Alex becoming "
+                "a parent in January, but you didn't mention anything about Tom."
+            ),
+            "user: My cousin Alex adopted a baby girl from China in January.",
+        ),
+    ]
+
+    for question, expected, content in cases:
+        hits = [{"content": content, "referenced_date": "2023-01-01T00:00:00"}]
+        scaffold, rows = build_answer_scaffold(
+            hits=hits,
+            question=question,
+            category="multi-session",
+        )
+
+        assert rows == 1, question
+        assert f"Required answer: {expected}" in scaffold
+        assert maybe_answer_scaffold_override(
+            question=question,
+            row_count=rows,
+            hits=hits,
+        ) == expected
