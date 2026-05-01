@@ -38,3 +38,9 @@ dist/
 data/
 audit/
 tests/tmp/
+
+# Generated benchmark/eval outputs
+runs/
+
+# Local git worktrees
+.worktrees/

@@ -1006,7 +1006,15 @@ def main():
     import uvicorn
 
     logger.info(f"Starting jarvis-memory API on {API_HOST}:{API_PORT}")
-    uvicorn.run(app, host=API_HOST, port=API_PORT)
+    # Keep production failures bounded: reject excess concurrent work
+    # instead of queueing forever, and close idle keepalive connections fast.
+    uvicorn.run(
+        app,
+        host=API_HOST,
+        port=API_PORT,
+        timeout_keep_alive=5,
+        limit_concurrency=32,
+    )
 
 
 if __name__ == "__main__":

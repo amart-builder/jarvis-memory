@@ -1,18 +1,61 @@
 # Jarvis Memory
 
-Shared, persistent memory for an agent fleet (OpenClaw on Mac Mini, Claude Code / Desktop, crons, plugins). Multiple writers share one Neo4j + ChromaDB backend, so a decision recorded from one surface is immediately visible in every other.
+Persistent memory for AI agents.
 
-## What problem it solves
+Jarvis Memory gives Claude Code, Codex, OpenClaw, crons, and custom agents one shared memory backend: Neo4j for the authoritative graph, ChromaDB for semantic recall, REST for app/runtime integrations, and MCP for coding-agent access.
 
-- Claude forgets between sessions. Compaction erases context.
-- Multiple AI systems need to see the same memories, or they diverge.
-- Useful memories (decisions, plans, corrections) need structure so they're retrievable weeks later.
+This is the memory system Alex Martin uses in his own agent stack. On April 30, 2026, Jarvis Memory scored **488 / 500 = 97.60%** raw correct on LongMemEval. LongMemEval is not a perfect test of true agent memory, but it is a useful signal: Jarvis is built for the harder real-world version, where agents need to remember decisions, handoffs, people, projects, corrections, and what changed over time.
 
-Jarvis is a typed-graph store with hybrid RRF search, compiled-truth entity pages, temporal facts, and a dream-cycle compactor — designed to be the canonical shared backend for cross-system continuity.
+Proof: [reports/longmemeval-proof-20260430.md](reports/longmemeval-proof-20260430.md)
 
-## Quick start (for users installing this as a service)
+## What It Does
 
-**→ See [CLIENT_INSTALL.md](CLIENT_INSTALL.md) for the full walkthrough.** TL;DR:
+- Saves durable memories as typed episodes: decisions, facts, plans, corrections, outcomes, preferences, handoffs.
+- Scopes memory by `group_id`, so one project or client does not leak into another.
+- Builds an entity graph in Neo4j with `:Page` nodes, typed edges, and evidence timelines.
+- Retrieves with hybrid search: vector similarity, Neo4j full-text, query expansion, graph boosts, and optional cross-encoder reranking.
+- Handles time: event-time validity (`as_of`) and ingestion-time validity (`seen_as_of`).
+- Keeps agent sessions continuous with `wake_up`, `latest_handoff`, `continue_session`, and `session_handoff`.
+- Exposes the same core system through REST and a 29-tool MCP server.
+
+## Mental Model
+
+```
+Agents and apps
+  Claude Code / Codex / OpenClaw / scripts / crons
+        |
+        |  MCP tools or REST calls
+        v
+Jarvis Memory
+  session manager
+  episode recorder
+  classifier
+  graph builder
+  retrieval pipeline
+        |
+        +--> Neo4j: source of truth, sessions, episodes, Pages, typed edges
+        |
+        +--> ChromaDB: rebuildable vector index for semantic search
+```
+
+Neo4j is the memory. ChromaDB is a fast recall sidecar. If ChromaDB disappears, the graph still holds the source of truth.
+
+## The Context Graph
+
+Jarvis Memory does use a context graph:
+
+- `Episode` nodes store the raw memory text.
+- `Session` nodes group episodes and chain work across devices.
+- `Page` nodes represent entities, projects, people, companies, systems, and concepts.
+- `EVIDENCED_BY` edges connect Pages back to the episodes that support them.
+- Typed edges such as `WORKS_AT`, `FOUNDED`, `ADVISES`, `DECIDED_ON`, `MENTIONS`, and `REFERS_TO` connect Pages to each other.
+- Multi-hop search can run Personalized PageRank over that graph for relationship-style queries.
+
+The honest caveat: graph extraction is conservative, and not every Page has a rich `compiled_truth` summary yet. The graph exists and is used, but the system is intentionally evidence-first instead of pretending every entity summary is perfect.
+
+## Quick Start
+
+For a local single-machine install:
 
 ```bash
 git clone https://github.com/amart-builder/jarvis-memory.git
@@ -20,295 +63,211 @@ cd jarvis-memory
 bash scripts/client-install.sh
 ```
 
-The installer handles venv, `.env`, schema migration, model pre-cache, scheduled compaction, and (optionally) MCP registration with Claude Code + Codex, Claude Code hooks, and the Minions background worker. Re-runnable and idempotent.
+For an agent-led install, give your agent this:
 
-## Developer quick start
+```text
+Install Jarvis Memory for my agent system. First read AGENT_RUNBOOK.md.
+Audit my OS, agent surfaces, MCP configs, Neo4j situation, security posture,
+and where I want memory to run. Then propose the smallest safe topology,
+install it, verify it, and show me the exact smoke-test output.
+```
+
+Agent runbook: [AGENT_RUNBOOK.md](AGENT_RUNBOOK.md)
+
+Full client install guide: [CLIENT_INSTALL.md](CLIENT_INSTALL.md)
+
+## Requirements
+
+- Python 3.10+
+- Neo4j 5.x
+- Git and curl
+- Optional but recommended: `ANTHROPIC_API_KEY` for query expansion and ambiguous classification
+- Optional: Claude Code, Codex, OpenClaw, or any MCP-speaking agent
+
+## Start The REST API
 
 ```bash
-git clone https://github.com/amart-builder/jarvis-memory.git
-cd jarvis-memory
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"                            # dev deps include pytest
-cp .env.example .env                               # fill in NEO4J_* and ANTHROPIC_API_KEY
-python scripts/migrate_to_v2.py                    # apply the entity-layer schema
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"  # pre-cache embedding model
-bash scripts/verify_install.sh                     # 30-second sanity check
-python -m jarvis_memory.api                        # REST on :3500
+source .venv/bin/activate
+python -m jarvis_memory.api
 ```
 
-`scripts/verify_install.sh` is the authoritative "is this install healthy?" check — 7 gates covering imports, entrypoints, Neo4j connectivity, schema state, ChromaDB, core flows, and the MCP tool surface.
+Default REST address: `http://localhost:3500`
 
-**Note on `setup.sh`:** deprecated — hardcodes a two-machine MBP/Mini assumption that no longer applies. Fresh installs use `scripts/client-install.sh` or the developer steps above. `setup.sh` refuses to run without `JARVIS_LEGACY_SETUP=1`.
+If you bind beyond loopback, set `JARVIS_API_BEARER_TOKEN` and preferably `JARVIS_REQUIRE_AUTH=1`. A writable memory server should not be exposed without auth.
 
-## Optional integrations
+## Smoke Test
 
-Each is a single command — install whichever ones fit your setup.
-
-| Integration | One-liner | What it does |
-|---|---|---|
-| **Claude Code MCP** | `python scripts/register_mcp.py --client claude-code` | Adds Jarvis as an MCP server in `~/.claude/settings.json` so Claude Code can call all 27 tools directly. |
-| **Codex CLI MCP** | `python scripts/register_mcp.py --client codex` | Same, for Codex: writes a `[mcp_servers.jarvis-memory]` block into `~/.codex/config.toml`. |
-| **Claude Code hooks** | `python install_hooks.py` | SessionStart injects recent project context at session open; PreCompact writes a [HANDOFF] episode before Claude Code auto-compacts. |
-| **Minions background worker** | `scripts/generate_launchagents.sh --with-minion-worker` (Mac) or `scripts/generate_systemd_units.sh --with-minion-worker` (Linux) | Starts a durable SQLite-backed job queue (ported from [garrytan/gbrain](https://github.com/garrytan/gbrain)) for deterministic scheduled work. Most installs don't need this on day one. |
-
-Each comes with a matching `--uninstall` flag for clean removal.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Writers                                 │
-│                                                              │
-│  OpenClaw (Mini)           Claude Code (MBP)    Crons / Hooks│
-│       │                           │                    │     │
-│       ▼                           ▼                    ▼     │
-│  REST API                    MCP server         Python import│
-│  localhost:3500              27 tools           direct       │
-└──────────┬─────────────────────┬─────────────────────┬───────┘
-           │                     │                     │
-           ▼                     ▼                     ▼
-       ┌──────────────────────────────────────────────────┐
-       │  jarvis_memory package (Python)                   │
-       │  SessionManager · EpisodeRecorder · Compaction   │
-       │  EmbeddingStore · LifecycleMgr · Classifier      │
-       └────────┬───────────────────────────────┬─────────┘
-                │                               │
-                ▼                               ▼
-          ┌──────────┐                    ┌──────────┐
-          │  Neo4j   │   source of        │ ChromaDB │
-          │  graph   │   truth            │ vector   │
-          │          │                    │ index    │
-          └──────────┘                    └──────────┘
-       (Mac Mini over Tailscale)       (local sidecar)
-```
-
-- **Neo4j** is authoritative. Episodes, Entities, Pages, Sessions, Snapshots, typed edges.
-- **ChromaDB** is a read-optimized embedding sidecar for semantic search. Can be rebuilt from Neo4j at any time (`EmbeddingStore.rebuild_from_neo4j()`).
-- **REST API** on `localhost:3500` exposes v1 + v2 endpoints (used by OpenClaw + generic HTTP clients).
-- **MCP server** exposes 27 tools to any MCP client (Claude Code, Claude Desktop). Parity-locked by `tests/test_mcp_parity.py`.
-- **Python package** is importable for direct access from scripts, crons, and hooks.
-
-### What's inside (gbrain-import features, merged 2026-04-20)
-
-- **Typed-edge graph + `:Page` entities** (`jarvis_memory.pages`, `graph`, `schema_v2`) — compiled-truth snapshots, typed relationships (`WORKS_AT`, `FOUNDED`, `DECIDED_ON`, …), orphan detection, doctor command.
-- **RRF hybrid search + intent classifier + Haiku multi-query expansion** (`jarvis_memory.search.*`) — `scored_search` now fuses Chroma vector results with Neo4j fulltext, routes by intent (`entity/temporal/event/general`), and fans out via Claude Haiku 4-5 (fails-open if `ANTHROPIC_API_KEY` is unset). `JARVIS_SEARCH_LEGACY=1` reverts to the pre-RRF composite scorer for A/B or rollback.
-- **Dream-cycle compaction** — daily cron now also runs `fix_citations`, `report_orphans`, `reconcile_stale_edges` subphases. Read-only hygiene; logs findings without mutating data.
-- **Minions** (`jarvis_memory.minions.*`, `data/minions.sqlite`) — SQLite-backed deterministic job queue. Shell handler is gated behind `GBRAIN_ALLOW_SHELL_JOBS=1`; default off.
-- **OperationContext trust boundary** (`jarvis_memory.operation_context`) — every write tagged `source=mcp|rest|cli`, `remote=True|False` for audit.
-- **Retrieval eval harness** (`jarvis_memory.eval`, `tests/eval_data/synthetic_*.jsonl`) — run `python -m jarvis_memory.eval ...` to measure R@k / MRR / nDCG. Baseline floor: R@5 ≥ 0.640, MRR ≥ 0.756, nDCG@10 ≥ 0.683.
-
-## Memory model
-
-Every episode has:
-
-| Field | Example | Purpose |
-|---|---|---|
-| `uuid` | `bb86abbf-af7c...` | Unique id |
-| `content` | `[DECISION] Chose Clerk over Auth0...` | Text |
-| `group_id` | `navi`, `foundry`, `system` | Project scope (a.k.a. "wing") |
-| `episode_type` | `decision`, `plan`, `fact`, `correction`, `completion`, `handoff` | Shape of memory |
-| `importance` | `0.5` – `1.0` | Retrieval weight |
-| `created_at` | timestamp | Recency ranking |
-| `session_id` | UUID | Parent session |
-
-Auto-tagged on write:
-- `wing` = `group_id` (project scope)
-- `room` = topic (auth / frontend / database / legal / infrastructure / ...) via 70+ keyword list
-- `hall` = memory category (decisions / plans / milestones / problems / context)
-
-## Canonical group_ids
-
-See [../brain/MEMORY_PROTOCOL.md](../brain/MEMORY_PROTOCOL.md) §1 for the full table. Summary:
-
-- Money projects: `navi`, `catalyst`, `foundry`, `forge`
-- Leverage: `atlas-system`, `supernova`, `combinator`
-- Side bets: `hello-world`, `library`, `openclaw-dreaming`, `atlas-web`
-- Bots: `gravity`, `sentinel`
-- Meta: `jarvis`, `system`
-- Historical (read-only): `legacy-memclawz`
-
-**Always** pass `group_id` on writes. Never omit. If a task doesn't map to a project, use `system`.
-
-## Common operations
-
-### Save a decision
-```python
-# Via Python (from a script)
-from jarvis_memory.conversation import SessionManager, EpisodeRecorder
-sm = SessionManager()
-er = EpisodeRecorder(driver=sm._driver)
-er.record_episode(
-    session_id=sm.create_session(group_id="navi", device="macbook-pro")["uuid"],
-    content="[DECISION] Moved Navi from Claude to Codex. WHY: ... IMPACT: ...",
-    episode_type="decision",
-    group_id="navi",  # IMPORTANT: pass explicitly
-    importance=0.9,
-)
-sm.close()
-```
-
-From Claude Code (MCP):
-```
-save_episode(content="[DECISION] ...", group_id="navi", episode_type="decision")
-```
-
-From OpenClaw (REST):
 ```bash
 curl -X POST http://localhost:3500/api/v2/save_episode \
   -H "Content-Type: application/json" \
-  -d '{"content":"[DECISION] ...","group_id":"navi","episode_type":"decision"}'
+  -d '{
+    "group_id": "demo",
+    "content": "[FACT] Jarvis Memory smoke test works. WHY: install verification.",
+    "episode_type": "fact"
+  }'
+
+curl -X POST http://localhost:3500/api/v2/scored_search \
+  -H "Content-Type: application/json" \
+  -d '{"group_id":"demo","query":"smoke test","limit":5}'
 ```
 
-### Load context at session start
-From Claude Code (MCP):
-```
-wake_up(group_id="navi")           # ~600 tokens of identity + essentials
-list_sessions(group_id="navi")     # recent sessions across both systems
-continue_session(group_id="navi")  # handoff from latest session if < 2h old
-```
+Run the local install verifier:
 
-### Search project memories
-```
-scored_search(query="auth setup", group_id="navi", room="auth")
-```
-
-Filters: `group_id`, `room`, `hall`, `memory_type`, `as_of` (temporal).
-
-### Compaction
-Scheduled via LaunchAgents (see `launchagents/`):
-- `compact-daily` runs at 3 AM daily (dedup near-duplicates from last 24h)
-- `compact-weekly` runs Sundays at 4 AM (consolidate daily digests)
-
-Manual trigger:
 ```bash
-.venv/bin/python scripts/run_compaction.py --tier daily
+bash scripts/verify_install.sh
 ```
 
-## Hooks
+## MCP Setup
 
-| Hook | Fires on | What it does |
-|---|---|---|
-| `claude_code_precompact.py` | `/compact` in Claude Code (manual or auto) | Writes `[HANDOFF]` episode + current user-message tail |
-| `claude_code_sessionstart.py` | New/resumed Claude Code session | Injects group_id's latest handoff + 5 recent episodes |
-| `session_start.py` | OpenClaw session start (REST-based) | Same idea but uses REST endpoints |
-| `session_stop.py` | OpenClaw session end | Triggers session compaction |
-| `pre_compact.py` | (inactive) older PreCompact variant for when Claude Code didn't support the event |
+Jarvis ships a 29-tool MCP server.
 
-Register in `~/.claude/settings.json`. See hook file docstrings for the exact config.
+Claude Code:
 
-## Config
-
-Edit `.env` (mode 600). Defaults sensible for local dev.
-
-| Var | Default | Purpose |
-|---|---|---|
-| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j endpoint. Set to the host running Neo4j; use `bolt://<tailscale-ip>:7687` if Neo4j lives on a different machine on your private network. |
-| `NEO4J_USER` / `NEO4J_PASSWORD` | — | Auth |
-| `ANTHROPIC_API_KEY` | — | LLM classifier for ambiguous episodes (optional) |
-| `JARVIS_W_SEMANTIC` / `W_RECENCY` / `W_IMPORTANCE` | 0.5 / 0.3 / 0.2 | Scored search weights |
-| `JARVIS_HALF_LIFE_DAYS` | 90 | Recency decay |
-| `JARVIS_DEDUP_DAILY` / `DEDUP_WEEKLY` | 0.88 / 0.92 | Compaction similarity thresholds |
-| `JARVIS_API_HOST` / `PORT` | `0.0.0.0` / `3500` | REST server (Mini) |
-| `JARVIS_GROUP_ID` | empty | Auto-detected from cwd if empty |
-| `JARVIS_DEVICE_ID` | hostname | Tagged on session nodes |
-
-## File layout
-
+```bash
+python scripts/register_mcp.py --client claude-code
 ```
+
+Codex:
+
+```bash
+python scripts/register_mcp.py --client codex
+```
+
+Then restart the client so it reloads MCP config.
+
+Important tools:
+
+- `save_episode`: write durable memory.
+- `scored_search`: search by meaning, recency, importance, graph hints, and filters.
+- `wake_up`: load a token-budgeted project context block at session start.
+- `session_handoff`: save a handoff before switching sessions or compacting context.
+- `latest_handoff` / `continue_session`: resume from another agent or device.
+- `get_page` / `list_pages`: inspect entity graph Pages.
+- `doctor`: check graph health.
+
+## Choosing `group_id`
+
+`group_id` is the memory boundary. Use one stable ID per project, client, product, or durable workstream.
+
+Good examples:
+
+- `acme-client`
+- `personal-chief-of-staff`
+- `my-saas-app`
+- `research`
+- `system`
+
+Rules:
+
+- Always pass `group_id` on writes.
+- Use short lowercase slugs.
+- Do not put unrelated clients or projects in the same `group_id`.
+- Use `system` only for admin/infrastructure memory.
+
+## What To Save
+
+Save durable information the agent should remember weeks later:
+
+- Decisions and why they were made.
+- User preferences and constraints.
+- Project status, blockers, and next steps.
+- Corrections: "that old fact is wrong now."
+- Handoffs before context compaction or switching agents.
+- Stable relationships between people, companies, projects, and systems.
+
+Do not save:
+
+- Scratch reasoning.
+- Temporary "in this chat" context.
+- Secrets.
+- Huge raw logs.
+- Anything the user would not want resurfacing later.
+
+Recommended memory shape:
+
+```text
+[DECISION] Chose Clerk over Auth0 for signup.
+WHY: Faster implementation and better current docs.
+IMPACT: Future auth work should assume Clerk unless this is superseded.
+```
+
+## Search And Time
+
+Basic recall:
+
+```text
+scored_search(query="what did we decide about auth?", group_id="my-saas-app")
+```
+
+Topic-filtered recall:
+
+```text
+scored_search(query="signup flow", group_id="my-saas-app", room="auth")
+```
+
+Temporal recall:
+
+```text
+scored_search(query="who owned billing?", group_id="my-saas-app", as_of="2026-04-01")
+```
+
+"What did we believe then?" recall:
+
+```text
+scored_search(query="deployment status", group_id="my-saas-app", seen_as_of="2026-04-01")
+```
+
+## Production Notes
+
+- Keep Neo4j backed up. It is the source of truth.
+- Treat ChromaDB as rebuildable cache.
+- Keep the REST API on loopback unless you set bearer auth.
+- Set `JARVIS_RERANK_DEVICE=cpu` on Apple Silicon if MPS is unstable.
+- Set `JARVIS_SEMANTIC_DEDUP=0` or lower `JARVIS_SEMANTIC_DEDUP_TIMEOUT` on small machines if compaction is too expensive.
+- The stop hook will not write canonical `STATUS.md` files unless you deliberately configure `JARVIS_STOP_STATUS_FALLBACK_PATH`, and it refuses `STATUS.md` by name.
+
+## File Layout
+
+```text
 jarvis-memory/
-├── README.md                  ← you are here
-├── .env                       ← secrets (mode 600, gitignored)
-├── .env.example               ← template
-├── pyproject.toml
-├── setup.sh / setup_venv.sh   ← bootstrap
-├── jarvis_memory/                ← core package
-│   ├── api.py                    ← FastAPI REST server (v1 compat + /api/v2/*)
-│   ├── config.py                 ← env loading
-│   ├── conversation.py           ← SessionManager, EpisodeRecorder, SnapshotManager
-│   ├── embeddings.py             ← ChromaDB wrapper
-│   ├── compaction.py             ← 3-tier dedup + dream-cycle hygiene phases
-│   ├── lifecycle.py              ← state machine (active/archived/superseded/...)
-│   ├── rooms.py                  ← 70+ keyword room detection + hall mapping
-│   ├── scoring.py                ← scored_search (RRF + intent + expansion; legacy composite behind env flag)
-│   ├── temporal.py               ← valid_from/valid_to fact management
-│   ├── classifier.py             ← 21-type memory classifier
-│   ├── wake_up.py                ← token-budgeted session-start context
-│   ├── schema_v2.py              ← Run 2 Neo4j schema (:Page, typed edges)
-│   ├── pages.py / graph.py       ← Page CRUD + typed-edge extraction
-│   ├── orphans.py / doctor.py    ← orphan detection + health reporter
-│   ├── operation_context.py      ← OperationContext trust boundary (Run 4)
-│   ├── search/                   ← RRF hybrid search (Run 3)
-│   │   ├── rrf.py                ← reciprocal-rank fusion
-│   │   ├── keyword.py            ← Neo4j fulltext search
-│   │   ├── boosts.py             ← compiled-truth + backlink boosts
-│   │   ├── intent.py             ← rule-based query intent classifier
-│   │   └── expansion.py          ← Haiku-backed multi-query expansion (fails-open)
-│   ├── minions/                  ← SQLite job queue (Run 4)
-│   │   ├── queue.py              ← MinionQueue with BEGIN IMMEDIATE locking
-│   │   ├── worker.py             ← MinionWorker (stdio + launchd)
-│   │   └── handlers/             ← built-in handlers (compact, shell-gated)
-│   ├── eval.py                   ← retrieval eval harness (R@k / MRR / nDCG)
-│   └── backfill_v2.py            ← back-populate legacy data into Run 2 schema
-├── mcp_server/
-│   └── server.py                 ← MCP tool surface (27 tools, parity-locked)
-├── hooks/                        ← event hooks (Claude Code + OpenClaw)
-├── launchagents/                 ← macOS launchd plists
-│   ├── com.atlas.jarvis-compact-daily.plist
-│   ├── com.atlas.jarvis-compact-weekly.plist
-│   ├── com.atlas.minion-worker.plist  ← Run 4 worker (not loaded by default)
-│   └── INSTALL_COMPACTION_CRON.md
-├── scripts/
-│   ├── run_compaction.py         ← cron runner (daily + weekly tiers, dream-cycle)
-│   ├── migrate_to_v2.py          ← idempotent Run 2 schema migration
-│   ├── gen_eval_corpus.py        ← synthetic corpus generator (Opus-4.7 backed)
-│   ├── verify_install.sh         ← 30-second post-install sanity check
-│   └── backfill_v2.py
-├── docs/eval/                    ← before/after eval reports per run
-├── tests/                        ← 514 tests
-│   ├── search/                   ← Run 3 (RRF, keyword, boosts, intent, expansion)
-│   ├── minions/                  ← Run 4 (queue, worker, handlers, shell, audit)
-│   └── eval_data/                ← synthetic_corpus_v1 / queries_v1 / qrels_v1
-├── data/                         ← SQLite (minions.sqlite), audit logs (gitignored)
-├── chromadb/                     ← local vector store (gitignored)
-└── audit/                        ← weekly-rotated shell-job audit trail (gitignored)
+|-- jarvis_memory/             core package
+|   |-- api.py                 FastAPI REST server
+|   |-- conversation.py        sessions, episodes, snapshots
+|   |-- graph.py               typed-edge extraction
+|   |-- pages.py               entity Page CRUD + timelines
+|   |-- scoring.py             hybrid retrieval entry point
+|   |-- search/                RRF, keyword, expansion, PPR, rerank
+|   |-- temporal.py            validity windows
+|   `-- wake_up.py             session-start context loader
+|-- mcp_server/server.py       29-tool MCP server
+|-- hooks/                     Claude Code and OpenClaw hooks
+|-- scripts/                   install, migration, compaction, MCP registration
+|-- launchagents/              macOS scheduled jobs
+|-- systemd/                   Linux scheduled jobs
+|-- tests/                     unit and contract tests
+|-- reports/                   benchmark proof reports
+|-- CLIENT_INSTALL.md          human install guide
+`-- AGENT_RUNBOOK.md           agent-led install and ops guide
 ```
 
-## Troubleshooting
+## Benchmark
 
-**MCP `save_episode` puts everything in `system`**
-Cached session in `/tmp/jarvis_current_session.json` is stuck on an old group_id. Fix: `rm /tmp/jarvis_current_session.json` and/or restart the MCP server after the 2026-04-17 code fix in `mcp_server/server.py`.
+Jarvis Memory scored **97.60%** on LongMemEval, measured as raw correct out of 500:
 
-**ChromaDB out of sync with Neo4j**
-Run `.venv/bin/python -c "from jarvis_memory.embeddings import EmbeddingStore; from neo4j import GraphDatabase; import os; d=GraphDatabase.driver(os.environ['NEO4J_URI'], auth=(os.environ['NEO4J_USER'], os.environ['NEO4J_PASSWORD'])); print(EmbeddingStore().rebuild_from_neo4j(d))"`
+- Correct: `488`
+- Total: `500`
+- Answerer: GPT-4.1
+- Judge: GPT-4o
+- Run ID: `phase12_full500_chk_20260430-0419`
 
-**Compaction counts are 0 forever**
-Check if the LaunchAgents are loaded: `launchctl list | grep jarvis-compact`. If not, re-run `launchagents/INSTALL_COMPACTION_CRON.md`.
+Proof pack:
 
-**Hook seems to do nothing**
-Tail the log: `tail -f "${JARVIS_LOG_DIR:-$HOME/.jarvis-memory/logs}/"{precompact,sessionstart}-hook.log`. Hooks exit 0 even on error to avoid blocking Claude Code.
+- [reports/longmemeval-proof-20260430.md](reports/longmemeval-proof-20260430.md)
+- [reports/proof/phase12_full500_chk_20260430-0419.hashes.txt](reports/proof/phase12_full500_chk_20260430-0419.hashes.txt)
+- [reports/proof/phase12_full500_chk_20260430-0419_merged500.summary.json](reports/proof/phase12_full500_chk_20260430-0419_merged500.summary.json)
 
-**Neo4j unreachable**
-Verify the endpoint: `nc -zv $(echo "$NEO4J_URI" | sed -E 's|^bolt://([^:]+):([0-9]+).*|\1 \2|')`. If Neo4j is on another machine (Tailscale, LAN, Docker), make sure that host is up and reachable.
+LongMemEval is a useful signal, not the whole product. The real goal is not leaderboard chasing; it is making agents act like they have a durable working memory.
 
-## Key files to know
+## License
 
-| If you want to... | Edit this |
-|---|---|
-| Add a new memory type | `classifier.py` + `rooms.py` HALL_MAP |
-| Add a new room / keyword | `rooms.py` ROOM_KEYWORDS |
-| Change search scoring | `scoring.py` + `.env` weights |
-| Add a new MCP tool | `mcp_server/server.py` |
-| Add a new REST endpoint | `api.py` |
-| Add a new hook | `hooks/` + register in `~/.claude/settings.json` |
-
-## Recent changes
-
-- **Unreleased — client-install path (for v1.0.0)**: `CLIENT_INSTALL.md` walkthrough + `scripts/client-install.sh` one-command installer, portable default paths (`CHROMADB_PATH` → `~/.jarvis-memory/chromadb`, hook logs via `JARVIS_LOG_DIR`), `scripts/generate_launchagents.sh` + `scripts/generate_systemd_units.sh` templated scheduling, `scripts/register_mcp.py` for Claude Code + Codex MCP registration, `scripts/upgrade.sh` for tag-based updates. `install_hooks.py` rewritten to be path-aware.
-- **2026-04-20 — feature port from [garrytan/gbrain](https://github.com/garrytan/gbrain) (4 runs, 514 tests, +36 from pre-port)**:
-    - *Run 1* — retrieval eval harness (P@k / R@k / MRR / nDCG), brain/memory/session routing rule, parity-lock tests.
-    - *Run 2* — `:Page` entity layer with `compiled_truth`/`timeline`, 8 typed edges, `orphans` + `doctor` commands, MCP surface 23 → 27 tools.
-    - *Run 3* — RRF hybrid search in `scored_search` (Chroma + Neo4j fulltext + compiled-truth/backlink boosts), rule-based intent classifier, Haiku-4-5 multi-query expansion with prompt-injection defense, dream-cycle compaction (`fix_citations`, `report_orphans`, `reconcile_stale_edges`). Eval delta: R@5 0.640 → 0.843, MRR 0.756 → 0.899, nDCG@10 0.683 → 0.841.
-    - *Run 4* — `MinionQueue` (SQLite-backed job queue with `BEGIN IMMEDIATE` claim locking), shell handler gated behind `GBRAIN_ALLOW_SHELL_JOBS`, `OperationContext` trust boundary tagging every write `source=mcp|rest|cli`.
-- **2026-04-17**: Rename `yoniclaw` → `legacy-memclawz` (137 nodes). MCP save_episode group_id bug fix. PreCompact + SessionStart hooks for Claude Code. Compaction LaunchAgents. Embeddings backfilled. Room-detection fallback logging.
-- **2026-04-07**: Cutover from MemClawz shim to standalone `jarvis_memory.api`. v1 compat layer preserved for OpenClaw hooks.
-- **v2 endpoints live** on `/api/v2/*` with room/hall auto-tagging and temporal fact management.
+MIT.

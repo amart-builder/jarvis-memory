@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jarvis-memory"
-version = "0.1.0"
-description = "Graphiti-based memory system for Jarvis agent fleet — forked with MemClawz algorithms"
+version = "1.0.1"
+description = "Persistent graph memory for AI agent fleets"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
