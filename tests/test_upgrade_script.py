@@ -22,7 +22,7 @@ def test_upgrade_to_accepts_tag_argument(tmp_path):
     _git(repo, "config", "user.name", "Test User")
     _git(repo, "add", "scripts/upgrade.sh")
     _git(repo, "commit", "-m", "initial")
-    _git(repo, "tag", "v1.0.0")
+    _git(repo, "tag", "-a", "v1.0.0", "-m", "test release")
     _git(repo, "remote", "add", "origin", repo.as_uri())
 
     result = subprocess.run(
