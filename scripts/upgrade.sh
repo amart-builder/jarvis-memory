@@ -65,7 +65,9 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 CURRENT="$(git rev-parse HEAD)"
-RESOLVED="$(git rev-parse "$TARGET")"
+# Annotated tags resolve to tag objects by default; compare the commit behind
+# the ref so an already-current release exits before reinstalling.
+RESOLVED="$(git rev-parse "$TARGET^{commit}")"
 
 if [[ "$CURRENT" == "$RESOLVED" ]]; then
     echo "✓ Already at $TARGET ($(git describe --tags --always)) — nothing to do."
